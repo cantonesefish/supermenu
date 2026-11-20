@@ -1,0 +1,21 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "mingw-release",
+      "displayName": "MinGW UCRT64 Release",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/mingw-ucrt64.cmake"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "mingw-release",
+      "configurePreset": "mingw-release"
+    }
+  ]
+}

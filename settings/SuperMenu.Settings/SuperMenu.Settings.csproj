@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>SuperMenu.Settings</AssemblyName>
+    <RootNamespace>SuperMenu.Settings</RootNamespace>
+    <Version>1.0.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+    <Product>SuperMenu 设置</Product>
+    <Company>SuperMenu</Company>
+    <Copyright>MIT License</Copyright>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <ApplicationIcon>Assets\SuperMenu.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <SatelliteResourceLanguages>zh-Hans</SatelliteResourceLanguages>
+    <TieredPGO>true</TieredPGO>
+    <DebugType>embedded</DebugType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- HarmonyOS Sans (unmodified vendor TTF files) is loaded privately at startup; see Assets/Fonts/README.md. -->
+    <None Update="Assets\Fonts\HarmonyOS_Sans_SC_*.ttf" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Update="Assets\Fonts\LICENSE-HarmonyOS-Sans.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Update="Assets\Fonts\SegoeIcons.ttf" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Update="Assets\Fonts\README.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Update="Assets\Backgrounds\README.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <!-- Preview / window backdrop wallpaper (Unsplash license, see README). Embedded so a lone exe still renders. -->
+    <Resource Include="Assets\Backgrounds\flow.jpg" />
+    <Resource Include="Assets\appicon.png" />
+    <Resource Include="Assets\SuperMenu.ico" />
+  </ItemGroup>
+
+</Project>

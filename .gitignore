@@ -1,0 +1,55 @@
+# Build output
+/native/build/
+/native/build-*/
+/native/cmake-build-*/
+/dist/
+/release/
+
+# .NET / WPF
+**/bin/
+**/obj/
+/settings/publish/
+*.user
+*.suo
+
+# Release artifacts
+*.zip
+*.7z
+*.sha256
+*.sha256sum
+*.nupkg
+
+# Native / link artifacts
+*.exe
+*.dll
+*.pdb
+*.obj
+*.exp
+*.lib
+*.ilk
+*.res
+*.rc.tmp
+
+# Logs and temporary QA screenshots
+*.log
+*.tmp
+*.temp
+_*.png
+/docs/dev/**/build*/
+/docs/dev/**/bin/
+/docs/dev/**/obj/
+
+# IDE / editor
+.vs/
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Local machine state
+*.local.json

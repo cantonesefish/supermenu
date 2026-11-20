@@ -1,0 +1,24 @@
+<UserControl x:Class="SuperMenu.Settings.Controls.SegmentedControl"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Name="RootControl"
+             Focusable="False"
+             SnapsToDevicePixels="True">
+    <Grid x:Name="Track" MinHeight="32" ClipToBounds="True">
+        <Border Background="{DynamicResource Brush.Segment.Track}" CornerRadius="8" />
+        <Border x:Name="Pill" CornerRadius="7" Margin="3"
+                Background="{DynamicResource Brush.Segment.Pill}"
+                BorderBrush="{DynamicResource Brush.Segment.Pill.Border}"
+                BorderThickness="1"
+                HorizontalAlignment="Left" VerticalAlignment="Stretch"
+                IsHitTestVisible="False">
+            <Border.RenderTransform>
+                <TranslateTransform x:Name="PillTransform" X="0" />
+            </Border.RenderTransform>
+            <Border.Effect>
+                <DropShadowEffect BlurRadius="8" ShadowDepth="1" Direction="270" Opacity="0.22" Color="#FF000000" />
+            </Border.Effect>
+        </Border>
+        <UniformGrid x:Name="SegmentsGrid" Rows="1" Background="Transparent" />
+    </Grid>
+</UserControl>

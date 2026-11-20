@@ -1,0 +1,3 @@
+// Generated from glass.hlsl by CMake. Do not edit.
+#pragma once
+static const char kGlassHlsl[] = R"SUPERMENU_GLASS(@GLASS_HLSL_SOURCE@)SUPERMENU_GLASS";

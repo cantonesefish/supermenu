@@ -1,0 +1,151 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- ============================================================ Palette: dark liquid glass ============================================================ -->
+    <Color x:Key="Color.Accent">#FFFFB25E</Color>
+    <Color x:Key="Color.Accent.Deep">#FFFF8F3D</Color>
+    <Color x:Key="Color.Accent.Soft">#33FFB25E</Color>
+    <Color x:Key="Color.Ink.Inverted">#FF1B1B1F</Color>
+    <Color x:Key="Color.Close">#FFFF5F57</Color>
+    <Color x:Key="Color.Minimise">#FFFEBC2E</Color>
+    <Color x:Key="Color.Zoom">#FF28C840</Color>
+    <Color x:Key="Color.Success">#FF34C759</Color>
+
+    <SolidColorBrush x:Key="Brush.Accent" Color="{StaticResource Color.Accent}" />
+    <SolidColorBrush x:Key="Brush.Accent.Deep" Color="{StaticResource Color.Accent.Deep}" />
+    <SolidColorBrush x:Key="Brush.Accent.Soft" Color="{StaticResource Color.Accent.Soft}" />
+    <SolidColorBrush x:Key="Brush.Text.Primary" Color="#F2FFFFFF" />
+    <SolidColorBrush x:Key="Brush.Text.Secondary" Color="#A0FFFFFF" />
+    <SolidColorBrush x:Key="Brush.Text.Tertiary" Color="#66FFFFFF" />
+    <SolidColorBrush x:Key="Brush.Text.Inverted" Color="{StaticResource Color.Ink.Inverted}" />
+    <SolidColorBrush x:Key="Brush.Card" Color="#0DFFFFFF" />
+    <SolidColorBrush x:Key="Brush.Card.Border" Color="#1FFFFFFF" />
+    <SolidColorBrush x:Key="Brush.Card.Hover" Color="#16FFFFFF" />
+    <SolidColorBrush x:Key="Brush.Divider" Color="#14FFFFFF" />
+    <SolidColorBrush x:Key="Brush.Control.Track" Color="#26FFFFFF" />
+    <SolidColorBrush x:Key="Brush.Control.Track.Off" Color="#2EFFFFFF" />
+    <SolidColorBrush x:Key="Brush.Control.Knob" Color="#FFF9F9FB" />
+    <SolidColorBrush x:Key="Brush.Segment.Track" Color="#17FFFFFF" />
+    <SolidColorBrush x:Key="Brush.Segment.Pill" Color="#2BFFFFFF" />
+    <SolidColorBrush x:Key="Brush.Segment.Pill.Border" Color="#33FFFFFF" />
+    <SolidColorBrush x:Key="Brush.Input" Color="#1FFFFFFF" />
+    <SolidColorBrush x:Key="Brush.Input.Border" Color="#2EFFFFFF" />
+    <SolidColorBrush x:Key="Brush.Toast" Color="#F21A1C23" />
+    <SolidColorBrush x:Key="Brush.Toast.Border" Color="#33FFFFFF" />
+    <SolidColorBrush x:Key="Brush.Success" Color="{StaticResource Color.Success}" />
+    <SolidColorBrush x:Key="Brush.Danger" Color="#FFFF6B5E" />
+    <SolidColorBrush x:Key="Brush.Nav.Pill" Color="#1FFFFFFF" />
+    <SolidColorBrush x:Key="Brush.Nav.Pill.Border" Color="#2BFFFFFF" />
+    <SolidColorBrush x:Key="Brush.Nav.Hover" Color="#12FFFFFF" />
+    <SolidColorBrush x:Key="Brush.Window.Fallback" Color="#FF12141B" />
+    <SolidColorBrush x:Key="Brush.Sidebar" Color="#0BFFFFFF" />
+
+    <LinearGradientBrush x:Key="Brush.PrimaryButton" StartPoint="0,0" EndPoint="0,1">
+        <GradientStop Color="#FFFFC46E" Offset="0" />
+        <GradientStop Color="#FFFFA149" Offset="0.55" />
+        <GradientStop Color="#FFFF8F3D" Offset="1" />
+    </LinearGradientBrush>
+    <LinearGradientBrush x:Key="Brush.PrimaryButton.Hover" StartPoint="0,0" EndPoint="0,1">
+        <GradientStop Color="#FFFFD085" Offset="0" />
+        <GradientStop Color="#FFFFB25C" Offset="0.55" />
+        <GradientStop Color="#FFFF9A4A" Offset="1" />
+    </LinearGradientBrush>
+    <LinearGradientBrush x:Key="Brush.PrimaryButton.Pressed" StartPoint="0,0" EndPoint="0,1">
+        <GradientStop Color="#FFEBA452" Offset="0" />
+        <GradientStop Color="#FFE88C36" Offset="1" />
+    </LinearGradientBrush>
+
+    <!-- Window-wide scrim painted over the blurred wallpaper. -->
+    <LinearGradientBrush x:Key="Brush.Window.Scrim" StartPoint="0,0" EndPoint="1,1">
+        <GradientStop Color="#B80E1016" Offset="0" />
+        <GradientStop Color="#CC0C0D12" Offset="0.45" />
+        <GradientStop Color="#E6090A0F" Offset="1" />
+    </LinearGradientBrush>
+
+    <LinearGradientBrush x:Key="Brush.Sidebar.Gradient" StartPoint="0,0" EndPoint="0,1">
+        <GradientStop Color="#14FFFFFF" Offset="0" />
+        <GradientStop Color="#08FFFFFF" Offset="0.55" />
+        <GradientStop Color="#10FFFFFF" Offset="1" />
+    </LinearGradientBrush>
+
+    <!-- Traffic-light fills -->
+    <LinearGradientBrush x:Key="Brush.Traffic.Close" StartPoint="0,0" EndPoint="0,1">
+        <GradientStop Color="#FFFF6B63" Offset="0" />
+        <GradientStop Color="#FFE8443B" Offset="1" />
+    </LinearGradientBrush>
+    <LinearGradientBrush x:Key="Brush.Traffic.Minimise" StartPoint="0,0" EndPoint="0,1">
+        <GradientStop Color="#FFFED45C" Offset="0" />
+        <GradientStop Color="#FFE8A81C" Offset="1" />
+    </LinearGradientBrush>
+    <LinearGradientBrush x:Key="Brush.Traffic.Zoom" StartPoint="0,0" EndPoint="0,1">
+        <GradientStop Color="#FF3ED45A" Offset="0" />
+        <GradientStop Color="#FF1FAE37" Offset="1" />
+    </LinearGradientBrush>
+
+    <DropShadowEffect x:Key="Effect.CardShadow" BlurRadius="24" ShadowDepth="8" Direction="270" Opacity="0.28" Color="#FF000000" />
+    <DropShadowEffect x:Key="Effect.WindowShadow" BlurRadius="38" ShadowDepth="8" Direction="270" Opacity="0.55" Color="#FF000000" />
+
+    <!-- ============================================================ Typography ============================================================ -->
+    <Style x:Key="Text.PageTitle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{DynamicResource Font.Semi}" />
+        <Setter Property="FontWeight" Value="Bold" />
+        <Setter Property="FontSize" Value="24" />
+        <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+        <Setter Property="TextOptions.TextFormattingMode" Value="Ideal" />
+    </Style>
+    <Style x:Key="Text.PageSubtitle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{DynamicResource Font.Body}" />
+        <Setter Property="FontSize" Value="12.5" />
+        <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+        <Setter Property="Margin" Value="1,5,0,0" />
+    </Style>
+    <Style x:Key="Text.SectionHeader" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{DynamicResource Font.Demi}" />
+        <Setter Property="FontWeight" Value="Medium" />
+        <Setter Property="FontSize" Value="12.5" />
+        <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+        <Setter Property="Margin" Value="3,0,0,9" />
+    </Style>
+    <Style x:Key="Text.CardTitle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{DynamicResource Font.Demi}" />
+        <Setter Property="FontWeight" Value="Medium" />
+        <Setter Property="FontSize" Value="13.5" />
+        <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+    </Style>
+    <Style x:Key="Text.RowTitle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{DynamicResource Font.Body}" />
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+    <Style x:Key="Text.RowHint" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{DynamicResource Font.Body}" />
+        <Setter Property="FontSize" Value="11.5" />
+        <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+        <Setter Property="Margin" Value="0,3,0,0" />
+        <Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+    <Style x:Key="Text.Value" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{DynamicResource Font.Demi}" />
+        <Setter Property="FontWeight" Value="Medium" />
+        <Setter Property="FontSize" Value="12.5" />
+        <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+        <Setter Property="HorizontalAlignment" Value="Right" />
+        <Setter Property="MinWidth" Value="46" />
+        <Setter Property="TextAlignment" Value="Right" />
+    </Style>
+    <Style x:Key="Text.Unit" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{DynamicResource Font.Body}" />
+        <Setter Property="FontSize" Value="10.5" />
+        <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Tertiary}" />
+        <Setter Property="Margin" Value="4,1,0,0" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+    <Style x:Key="Text.Mono" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{DynamicResource Font.Mono}" />
+        <Setter Property="FontSize" Value="11.5" />
+        <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}" />
+    </Style>
+
+</ResourceDictionary>
