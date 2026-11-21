@@ -1,11 +1,11 @@
 #include <windows.h>
 
-1 24 "app.manifest"
-101 ICON "../../assets/supermenu.ico"
+1 24 "@CMAKE_CURRENT_SOURCE_DIR@/resources/app.manifest"
+101 ICON "@CMAKE_CURRENT_SOURCE_DIR@/../assets/supermenu.ico"
 
 1 VERSIONINFO
-FILEVERSION     1,0,0,0
-PRODUCTVERSION  1,0,0,0
+FILEVERSION     @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
+PRODUCTVERSION  @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
 FILEFLAGSMASK   0x3fL
 FILEFLAGS       0x0L
 FILEOS          VOS_NT_WINDOWS32
@@ -18,12 +18,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "SuperMenu"
             VALUE "FileDescription",  "SuperMenu — liquid glass menu bar"
-            VALUE "FileVersion",      "1.0.0.0"
+            VALUE "FileVersion",      "@PROJECT_VERSION@.0"
             VALUE "InternalName",     "SuperMenuBar"
             VALUE "LegalCopyright",   "MIT License"
             VALUE "OriginalFilename", "SuperMenuBar.exe"
             VALUE "ProductName",      "SuperMenu"
-            VALUE "ProductVersion",   "1.0.0.0"
+            VALUE "ProductVersion",   "@PROJECT_VERSION@.0"
         END
     END
     BLOCK "VarFileInfo"

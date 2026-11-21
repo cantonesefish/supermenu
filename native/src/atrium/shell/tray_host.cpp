@@ -26,6 +26,9 @@ constexpr UINT_PTR kPopupTimer = 3;     // the dwell before a popup request (NIN
 constexpr UINT kPopupMs = 500;
 constexpr UINT_PTR kRecollectTimer = 4; // after Explorer's own TaskbarCreated, the host's
 constexpr UINT kRecollectMs = 1500;
+constexpr int kRecollectTries = 4;      // looks for the new shell before giving its broadcast up
+constexpr ULONGLONG kConfirmMs = 150;   // the one z-order challenge: checked again after this
+constexpr ULONGLONG kEchoMs = 1000;     // the host's own TaskbarCreated comes back at once
 constexpr DWORD kForwardMs = 4000;      // as long as an app waits for Explorer anyway
 constexpr DWORD kSignature = 0x34753423;
 constexpr uint64_t kImageBase = 1ull << 62; // apart from TrayModel's own picture versions
@@ -215,6 +218,9 @@ void TrayHost::Run()
     ChangeWindowMessageFilterEx(w, WM_COPYDATA, MSGFLT_ALLOW, nullptr);
     ChangeWindowMessageFilterEx(w, taskbarCreated_, MSGFLT_ALLOW, nullptr);
     window_ = w;
+    // The shell the host starts with: a TaskbarCreated that finds another session is
+    // Explorer restarting, the same session is another tray host (OnTaskbarCreated).
+    session_ = CaptureSession();
     // Explorer's taskbar comes before the host when it is shown or activated: back at
     // once on those events (the timer below is the fallback), so that no app's call
     // goes past the host meanwhile.
@@ -222,13 +228,13 @@ void TrayHost::Run()
     HWINEVENTHOOK shown = SetWinEventHook(EVENT_OBJECT_SHOW, EVENT_OBJECT_SHOW, nullptr, ShellEvent, 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
     HWINEVENTHOOK foreground =
         SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr, ShellEvent, 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+    // The one startup ownership decision: when it is made and the host is first, it
+    // broadcasts the apps' TaskbarCreated (see TakeOwnership/MaybeBroadcastStartup).
     KeepFirst();
     SetTimer(w, kKeepTimer, kKeepMs, nullptr);
     SetTimer(w, kPruneTimer, kPruneMs, nullptr);
     if (ready_)
         SetEvent(ready_);
-    if (!yielded_ && !stopping_)
-        Broadcast();
 
     for (;;) {
         if (WaitForSingleObject(stop_, 0) == WAIT_OBJECT_0)
@@ -268,12 +274,177 @@ void TrayHost::Run()
     Log(L"tray host: off");
 }
 
-// The apps already running add their icons again, now through the host.
-void TrayHost::Broadcast()
+// The shell's identity: its process (plus its creation time, so that a reused PID is
+// a new session) and its own Shell_TrayWnd. Captured when the host starts; compared on
+// every TaskbarCreated, so that a broadcast only counts as Explorer restarting when the
+// shell the host knows is gone or replaced - another tray host's broadcast is not.
+TrayHost::ShellSession TrayHost::CaptureSession()
+{
+    ShellSession s;
+    HWND desktop = GetShellWindow();
+    if (!desktop)
+        return s;
+    s.pid = PidOf(desktop);
+    if (!s.pid)
+        return s;
+    if (HANDLE p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, s.pid)) {
+        FILETIME created{}, exited{}, kernel{}, user{};
+        if (GetProcessTimes(p, &created, &exited, &kernel, &user)) {
+            ULARGE_INTEGER time;
+            time.LowPart = created.dwLowDateTime;
+            time.HighPart = created.dwHighDateTime;
+            s.created = time.QuadPart;
+        }
+        CloseHandle(p);
+    }
+    for (HWND h = nullptr; (h = FindWindowExW(nullptr, h, L"Shell_TrayWnd", nullptr)) != nullptr;) {
+        if (PidOf(h) == s.pid) {
+            s.tray = h;
+            break;
+        }
+    }
+    return s;
+}
+
+// A changed shell session: another shell process (a different PID, or one reused - told
+// apart by the creation time), or the Shell_TrayWnd the host knew is gone.
+bool TrayHost::NewSession(const ShellSession& now, const ShellSession& was)
+{
+    if (!was.pid)
+        return false; // nothing captured yet: the first broadcast is not a restart
+    if (!now.pid)
+        return true; // no shell at all
+    if (now.pid != was.pid)
+        return true;
+    if (now.created && was.created && now.created != was.created)
+        return true;
+    if (!now.tray)
+        return true;
+    if (was.tray && !IsWindow(was.tray))
+        return true;
+    return false;
+}
+
+bool TrayHost::SameSession(const ShellSession& a, const ShellSession& b)
+{
+    if (!a.pid || !b.pid)
+        return !a.pid && !b.pid;
+    if (a.pid != b.pid)
+        return false;
+    if (a.created && b.created && a.created != b.created)
+        return false;
+    return !a.tray || !b.tray || a.tray == b.tray;
+}
+
+// The apps already running add their icons again, now through the host. Sent only when
+// the host holds the stream at startup and after a confirmed Explorer restart - never
+// from a z-order path, which is what made two tray hosts amplify each other.
+void TrayHost::Broadcast(const wchar_t* why)
 {
     broadcastAt_ = GetTickCount64();
     SendNotifyMessageW(HWND_BROADCAST, taskbarCreated_, 0, 0);
-    Log(L"tray host: on, apps asked to add their icons again");
+    if (why)
+        Log(L"tray host: apps asked to add their icons again (%s)", why);
+    else
+        Log(L"tray host: on, apps asked to add their icons again");
+}
+
+// The startup broadcast is owed once: right away when the host is first, or after the
+// one confirmation wait when another program's tray host was there first.
+void TrayHost::MaybeBroadcastStartup()
+{
+    if (!startupNotice_ || own_ != Ownership::Owned || restartPending_ || stopping_)
+        return;
+    startupNotice_ = false;
+    Broadcast(nullptr);
+}
+
+void TrayHost::TakeOwnership()
+{
+    if (own_ == Ownership::Owned)
+        return;
+    own_ = Ownership::Owned;
+    owned_ = true;
+    yielded_ = false;
+    dirty_ = true;
+    MaybeBroadcastStartup();
+}
+
+// The other tray host answered the one challenge: it keeps the stream for the rest of
+// the session. No more z-order changes, no more broadcasts, no repeated log line.
+void TrayHost::YieldStream(DWORD ownerPid)
+{
+    own_ = Ownership::Yielded;
+    owned_ = false;
+    yielded_ = true;
+    startupNotice_ = false;
+    dirty_ = true;
+    Log(L"tray host: another program's tray (pid %lu) is in front: left there", ownerPid);
+}
+
+// A registered TaskbarCreated is Explorer restarting only when the shell session the
+// host knows changed (or its Shell_TrayWnd vanished). Anything else - most often
+// another tray host asking the apps the same question - is ignored, no broadcast back.
+void TrayHost::OnTaskbarCreated(HWND h)
+{
+    if (stopping_)
+        return;
+    const ULONGLONG now = GetTickCount64();
+    if (broadcastAt_ && now - broadcastAt_ <= kEchoMs)
+        return; // the host's own broadcast, back here at once
+    const ShellSession current = CaptureSession();
+    if (!session_.pid) {
+        // The host was started before the shell was there: the first session seen becomes
+        // the baseline instead of looking like a restart. (Apps were asked at startup; the
+        // read-back covers anything that went past the host in between.)
+        session_ = current;
+        return;
+    }
+    if (restartPending_ && SameSession(current, restartSession_))
+        return; // the same restart, one broadcast will answer it
+    if (!NewSession(current, session_)) {
+        if (now - ignoredNoticeAt_ >= 5000) {
+            ignoredNoticeAt_ = now;
+            Log(L"tray host: another host's TaskbarCreated ignored");
+        }
+        return;
+    }
+    Log(L"tray host: Explorer restarted");
+    restartPending_ = true;
+    restartSession_ = current;
+    recollectTries_ = 0;
+    KeepFirst(); // its new taskbar may have come first for a moment
+    SetTimer(h, kRecollectTimer, kRecollectMs, nullptr);
+}
+
+// The one broadcast after a confirmed Explorer restart: wait until the new taskbar is
+// there, adopt its session, then ask the apps once. Bounded - never a loop.
+void TrayHost::OnRecollect(HWND h)
+{
+    KillTimer(h, kRecollectTimer);
+    if (!restartPending_)
+        return;
+    const ShellSession current = CaptureSession();
+    if (!current.pid || !current.tray) {
+        if (++recollectTries_ < kRecollectTries) {
+            SetTimer(h, kRecollectTimer, kRecollectMs, nullptr);
+            return;
+        }
+        restartPending_ = false;
+        Log(L"tray host: Explorer did not come back; apps are not asked again");
+        return;
+    }
+    if (!NewSession(current, session_)) {
+        restartPending_ = false; // not Explorer after all: nothing to ask the apps
+        return;
+    }
+    session_ = current;
+    restartSession_ = current;
+    restartPending_ = false;
+    startupNotice_ = false; // the restart's one broadcast is the startup notice's too
+    KeepFirst();            // be first again before the apps add their icons
+    if (own_ == Ownership::Owned)
+        Broadcast(L"after Explorer restarted");
 }
 
 void CALLBACK TrayHost::ShellEvent(HWINEVENTHOOK, DWORD, HWND hwnd, LONG object, LONG, DWORD, DWORD)
@@ -338,9 +509,7 @@ LRESULT TrayHost::Message(HWND h, UINT m, WPARAM w, LPARAM l)
             KillTimer(h, kPopupTimer);
             Popup(true);
         } else if (w == kRecollectTimer) {
-            KillTimer(h, kRecollectTimer);
-            if (!yielded_)
-                Broadcast();
+            OnRecollect(h);
         }
         return 0;
     case WM_WINDOWPOSCHANGING:
@@ -374,14 +543,7 @@ LRESULT TrayHost::Message(HWND h, UINT m, WPARAM w, LPARAM l)
         return 0;
     }
     if (m == taskbarCreated_) {
-        // The host's own broadcast comes back here; any other is Explorer restarting. Its
-        // new taskbar may have come first for a moment, and the apps' new icons gone to it
-        // only: once in front again the host asks for them once more.
-        if (GetTickCount64() - broadcastAt_ > 3000) {
-            Log(L"tray host: Explorer restarted");
-            KeepFirst();
-            SetTimer(h, kRecollectTimer, kRecollectMs, nullptr);
-        }
+        OnTaskbarCreated(h);
         return 0;
     }
     // A close, a command, a private message of the taskbar: Explorer's, as if sent to it.
@@ -540,9 +702,12 @@ LRESULT TrayHost::OnIconRect(WPARAM w, const COPYDATASTRUCT* cds)
 }
 
 // Shell_NotifyIcon finds the first Shell_TrayWnd in the z-order. Explorer's comes
-// before the host now and then (its taskbar is topmost too): the host moves back.
-// Another program's (RetroBar, ExplorerPatcher's, a second shell) is left in front:
-// two hosts pushing in turn would take the icons from both.
+// before the host now and then (its taskbar is topmost too): the host moves back in
+// front. Another program's tray host (RetroBar, ExplorerPatcher's, a second shell) is
+// met exactly once: one z-order challenge, checked again after a moment, and then the
+// host either holds the stream or yields for the rest of the session. It never pushes
+// back while yielded and never broadcasts from here, so two hosts cannot ask the apps
+// for their icons in turn.
 void TrayHost::KeepFirst()
 {
     HWND w = window_.load();
@@ -556,29 +721,82 @@ void TrayHost::KeepFirst()
     // E_NOTIMPL: apps that show progress on their button would not start (TeraCopy #90, NanaZip #86).
     if (HANDLE band = shell ? GetPropW(shell, kTaskband) : nullptr; band != GetPropW(w, kTaskband))
         SetPropW(w, kTaskband, band);
+
+    const ULONGLONG now = GetTickCount64();
     HWND first = FindWindowW(L"Shell_TrayWnd", nullptr);
     if (first == w) {
-        if (yielded_.exchange(false)) {
-            Log(L"tray host: in front again");
-            dirty_ = true;
-            SetTimer(w, kRecollectTimer, 200, nullptr); // updates went past the host meanwhile
+        if (attempt_ != Attempt::None) {
+            if (now < attemptAt_)
+                return; // let the other host answer the one challenge first
+            attempt_ = Attempt::None;
         }
+        if (own_ == Ownership::Yielded) {
+            // The other host left the first place for a moment (its own AppBar call, a
+            // taskbar transition): nothing to win, no broadcast. The read-back catches up.
+            if (!inFrontLogged_) {
+                inFrontLogged_ = true;
+                dirty_ = true;
+                Log(L"tray host: in front again (yielded: left as it is)");
+            }
+            return;
+        }
+        if (own_ == Ownership::Pending)
+            TakeOwnership();
         return;
     }
-    const DWORD owner = PidOf(first);
-    if (first && owner != GetCurrentProcessId() && owner != PidOf(shell)) {
-        if (!yielded_.exchange(true)) {
-            Log(L"tray host: another program's tray (pid %lu) is in front: left there", owner);
-            dirty_ = true;
+
+    if (own_ == Ownership::Yielded)
+        return; // the yield is for the session: no more z-order fights, no more broadcasts
+
+    const DWORD self = GetCurrentProcessId();
+    const DWORD shellPid = PidOf(GetShellWindow());
+    const DWORD firstPid = PidOf(first);
+    // Another program's host: not the host's own window and not Explorer's taskbar. While
+    // the shell process is unknown (Explorer restarting) a window is taken for its taskbar:
+    // moving back in front is right then, and a wrong yield would cost the whole session.
+    const bool foreign = first && firstPid && firstPid != self && shellPid && firstPid != shellPid;
+    if (foreign) {
+        if (attempt_ == Attempt::Startup || attempt_ == Attempt::Takeover) {
+            if (now < attemptAt_)
+                return; // the one challenge is still being checked
+            attempt_ = Attempt::None;
+            YieldStream(firstPid); // it answered: it keeps the stream, for good
+            return;
         }
+        if (own_ == Ownership::Pending) {
+            // One deterministic attempt at startup: take the first place once, then look
+            // again after a moment. If the other host is first then, the host yields.
+            attempt_ = Attempt::Startup;
+            attemptAt_ = now + kConfirmMs;
+            SetWindowPos(w, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+            Log(L"tray host: another program's tray (pid %lu) is in front: one attempt to take the stream", firstPid);
+            return;
+        }
+        if (!takeoverUsed_) {
+            // It took the first place later while the host held it: one attempt to take
+            // the stream back, and never another one.
+            takeoverUsed_ = true;
+            attempt_ = Attempt::Takeover;
+            attemptAt_ = now + kConfirmMs;
+            SetWindowPos(w, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+            Log(L"tray host: another program's tray (pid %lu) took the stream: one attempt to take it back", firstPid);
+            return;
+        }
+        YieldStream(firstPid);
         return;
     }
+
+    // Explorer's taskbar is first: move back in front of it (it does not fight back;
+    // without this no app's call would reach the host after its taskbar was shown).
+    attempt_ = Attempt::None;
     SetWindowPos(w, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
     const bool again = FindWindowW(L"Shell_TrayWnd", nullptr) == w;
-    const ULONGLONG now = GetTickCount64();
-    if (now - lostAt_ > 60000) // not on every round
+    if (again && own_ == Ownership::Pending)
+        TakeOwnership();
+    if (now - lostAt_ > 60000) { // not on every round
         Log(L"tray host: Explorer's taskbar came first; moved back (%s)", again ? L"first again" : L"still second");
-    lostAt_ = now;
+        lostAt_ = now;
+    }
 }
 
 // The list in the log whenever its make-up changes (not on a picture or tooltip change).

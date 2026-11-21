@@ -8,13 +8,13 @@
 #include "popup_window.h"
 #include "settings.h"
 #include "system_status.h"
-#include "tray.h"
-#include "atrium/shell/tray_host.h"
+#include "atrium/shell/tray_model.h"
 
 #include <atomic>
 #include <condition_variable>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -45,12 +45,13 @@ public:
         return popup_.IsVisible() && !popup_.closing() && popup_.kind() == PopupKind::ControlCenter;
     }
     bool trayOverflowOpen() const override;
-    const std::vector<TrayIcon>& trayIcons() const override { return tray_.icons(); }
+    const std::vector<atrium::TrayIcon>& trayIcons() const override { return trayIconsCache_; }
+    RECT trayAreaScreenRect() const override;
     const MediaInfo& mediaInfo() const override { return media_.info(); }
     bool focusOn() const override { return sys_.status().focusOn; }
-    void OnTrayIconActivated(const std::wstring& id) override;
-    void OnTrayIconContext(const std::wstring& id) override;
-    void ActivateTrayIcon(const std::wstring& id, bool rightButton);
+    void OnTrayIconActivated(const atrium::TrayIcon& icon) override;
+    void OnTrayIconContext(const atrium::TrayIcon& icon) override;
+    void OnTrayIconHover(const atrium::TrayIcon* icon) override;
     void OnTrayOverflow(RECT anchorScreen) override;
     void OnDisplayChanged() override;
     void OnOpenSettings() override;
@@ -75,7 +76,7 @@ private:
     void QueueMute(bool muted);
     void HardwareLoop();
     void RefreshTray(bool force);
-    void RefreshTrayFromHost();
+    void OnTrayModelEvent(WPARAM event);
     void WriteTrayLiveFile();
     void RestartForDisplayChange();
     void ShowMenu(MenuId id, RECT anchor);
@@ -109,8 +110,16 @@ private:
     SystemMonitor sys_;
     MediaMonitor media_;
     Settings settings_;
-    TrayReader tray_;
-    std::unique_ptr<atrium::TrayHost> trayHost_;
+    // One model owns both sources of the notification area: its worker reads
+    // Explorer's tray back and its host receives the apps' Shell_NotifyIcon calls.
+    std::unique_ptr<atrium::TrayModel> tray_;
+    // UI-thread copy of TrayModel::Icons(): the bar and the popup draw and click
+    // only this snapshot, so a model refresh never invalidates what is on screen.
+    std::vector<atrium::TrayIcon> trayIconsCache_;
+    // Left-click continuation: the last left-clicked icon and when, so a second
+    // click within the double-click time becomes the shell's second click.
+    std::optional<atrium::TrayIcon> lastTrayClick_;
+    ULONGLONG lastTrayClickTick_ = 0;
     std::unique_ptr<BarWindow> bar_;
     PopupWindow popup_;
     HWND trayHwnd_ = nullptr;

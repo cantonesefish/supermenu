@@ -1,5 +1,6 @@
 #include "app.h"
 #include "log.h"
+#include "supermenu_version.h"
 
 #include <objbase.h>
 #include <shellapi.h>
@@ -68,7 +69,7 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int) {
     auto setCtx = reinterpret_cast<SetCtxFn>(
         GetProcAddress(GetModuleHandleW(L"user32.dll"), "SetProcessDpiAwarenessContext"));
     if (!setCtx || !setCtx(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) SetProcessDPIAware();
-    sm::Log(L"main: SuperMenu 1.0.0 starting");
+    sm::Log(L"main: SuperMenu %ls starting", SUPERMENU_VERSION_W);
 
     sm::App app;
     int rc = app.Run(hinst, wantSettings);

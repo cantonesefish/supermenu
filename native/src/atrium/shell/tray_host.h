@@ -9,15 +9,18 @@
 // unchanged, so the system tray stays complete and takes over again the moment
 // the window is gone. Every other message to the window goes on to Explorer's
 // taskbar too. Apps that were already running add their icons again on
-// TaskbarCreated, which the host broadcasts when it starts (and again after
-// Explorer restarts). Clicks and hovering are the callback messages the shell
-// itself sends (shell/tray_protocol.h). Nothing is injected anywhere. The pattern
-// is ManagedShell's TrayService (Cairo, RetroBar).
+// TaskbarCreated, which the host broadcasts exactly once when it starts and once
+// after Explorer itself is confirmed to have restarted (its shell session changed,
+// not another tray host asking the same). Clicks and hovering are the callback
+// messages the shell itself sends (shell/tray_protocol.h). Nothing is injected
+// anywhere. The pattern is ManagedShell's TrayService (Cairo, RetroBar).
 //
-// Never in the way of Windows: the window has a thread of its own (a busy UI
-// thread never holds up an app's call); a failure while reading a call still
-// passes it on; another program's tray host in front is left there; and the
-// guard process puts Explorer's taskbar in front if the window stops answering.
+// Never in the way of Windows or of another tray host: the window has a thread of
+// its own (a busy UI thread never holds up an app's call); a failure while reading
+// a call still passes it on; the Shell_TrayWnd stream is claimed once, then either
+// held or yielded for the whole session (one z-order challenge, never a ping-pong,
+// and no TaskbarCreated from the z-order paths); and the guard process puts
+// Explorer's taskbar in front if the window stops answering.
 #pragma once
 
 #include "icon_image.h"
@@ -62,9 +65,14 @@ public:
     TrayHost& operator=(const TrayHost&) = delete;
 
     bool Running() const { return window_.load() != nullptr; }
-    // Another program's tray host (RetroBar, a second shell) is in front: Atrium
-    // leaves it there and reads Explorer's tray meanwhile.
-    bool Yielded() const { return yielded_; }
+    // The host holds the apps' Shell_NotifyIcon stream (it is the first Shell_TrayWnd).
+    // False while the one startup ownership check is still running, and for a host that
+    // yielded to another program's tray host (then it stays false for the session).
+    bool Owned() const { return owned_.load(); }
+    // Another program's tray host (RetroBar, a second shell) holds the stream: Atrium
+    // leaves it there for the rest of the session and reads Explorer's tray meanwhile.
+    // It never pushes back in front and never broadcasts TaskbarCreated again.
+    bool Yielded() const { return yielded_.load(); }
     std::vector<HostIcon> Icons() const;
     // The programs whose icon flashes now: QQ and WeChat flash theirs for a new message (they
     // have no window to flash while they sit in the tray).
@@ -81,6 +89,24 @@ public:
     void SetPlaces(RECT anchor);
 
 private:
+    // The shell's identity: captured when the host starts and compared on every
+    // TaskbarCreated, so that only a changed shell session counts as Explorer
+    // restarting (another tray host's broadcast is the same session and is ignored).
+    struct ShellSession {
+        HWND tray = nullptr;   // the shell's own Shell_TrayWnd
+        DWORD pid = 0;         // the shell process (Explorer)
+        ULONGLONG created = 0; // its process creation time (GetProcessTimes)
+    };
+    // The one z-order challenge the state machine allows at a time, checked again
+    // after a short wait; None whenever the host is not waiting for an answer.
+    enum class Attempt { None, Startup, Takeover };
+    // Pending: the startup decision is not made yet; Owned/Yielded: made, for the session.
+    enum class Ownership { Pending, Owned, Yielded };
+
+    static ShellSession CaptureSession();
+    static bool NewSession(const ShellSession& now, const ShellSession& was);
+    static bool SameSession(const ShellSession& a, const ShellSession& b);
+
     void Run();
     static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM w, LPARAM l);
     static void CALLBACK ShellEvent(HWINEVENTHOOK, DWORD, HWND hwnd, LONG object, LONG, DWORD, DWORD);
@@ -89,7 +115,12 @@ private:
     void Record(const COPYDATASTRUCT* cds, std::shared_ptr<const IconImage> image, LRESULT result);
     LRESULT OnIconRect(WPARAM w, const COPYDATASTRUCT* cds);
     LRESULT Forward(UINT m, WPARAM w, LPARAM l);
-    void Broadcast();
+    void Broadcast(const wchar_t* why);
+    void MaybeBroadcastStartup();
+    void TakeOwnership();
+    void YieldStream(DWORD ownerPid); // (not "Yield": winbase.h has that as a macro)
+    void OnTaskbarCreated(HWND h);
+    void OnRecollect(HWND h);
     void KeepFirst();
     void Prune();
     void LogList();
@@ -102,7 +133,8 @@ private:
     HANDLE ready_ = nullptr, stop_ = nullptr;
     std::atomic<HWND> window_{nullptr};
     std::atomic_bool dirty_ = false;   // changed since the last notice (posted at most every 100 ms)
-    std::atomic_bool yielded_ = false;
+    std::atomic_bool owned_ = false;   // the host holds the Shell_NotifyIcon stream
+    std::atomic_bool yielded_ = false; // another program's tray host holds it, for the session
     std::atomic_bool stopping_ = false; // going: no longer moves itself in front
     std::thread thread_;
     mutable std::mutex mutex_;
@@ -115,6 +147,18 @@ private:
     ULONGLONG lostAt_ = 0, broadcastAt_ = 0;
     std::wstring loggedKeys_; // host thread: the list as last logged
     bool flashing_ = false;   // host thread: some icon flashed at the last look
+    // All of the tray state below is the host thread's own.
+    ShellSession session_;          // the shell the host last knew (baseline for a restart)
+    ShellSession restartSession_;   // the shell a restart being confirmed led to
+    Ownership own_ = Ownership::Pending;
+    Attempt attempt_ = Attempt::None;
+    ULONGLONG attemptAt_ = 0;       // when the one challenge in flight is checked again
+    bool takeoverUsed_ = false;     // the one later takeover attempt was spent
+    bool restartPending_ = false;   // Explorer restarted: waiting for the shell, then one broadcast
+    bool startupNotice_ = true;     // the startup broadcast is still owed
+    int recollectTries_ = 0;        // how often a confirmed restart still found no taskbar
+    bool inFrontLogged_ = false;    // (yielded) in front again: logged once, no z-order change
+    ULONGLONG ignoredNoticeAt_ = 0; // last "another host's TaskbarCreated" line (at most every 5 s)
 };
 
 } // namespace atrium

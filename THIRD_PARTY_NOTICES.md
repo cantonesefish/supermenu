@@ -2,7 +2,7 @@
 
 ## Atrium Desktop
 
-The tray-host code under `native/src/atrium/` is adapted from
+The tray subsystem under `native/src/atrium/` is adapted from
 [Atrium Desktop](https://github.com/wynter-yaxley/atrium-desktop), used under the
 MIT License:
 
@@ -30,9 +30,17 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-Adapted files: `atrium/shell/tray_host.*`, `atrium/shell/tray_protocol.h`,
-`atrium/shell/shell_taskbar.h`, `atrium/icon_image.h`, and the HICON-to-image
-subset of `atrium/shell/shell_icon.*`.
+Adapted files:
+
+- `atrium/shell/tray_host.*`, `atrium/shell/tray_protocol.h`,
+  `atrium/shell/shell_taskbar.h`, `atrium/icon_image.h`, and the HICON-to-image
+  subset of `atrium/shell/shell_icon.*` (the original tray-host port).
+- The two-source tray refactor additionally adapts `atrium/shell/tray_model.*`
+  (upstream `native/core/shell/tray_model.*`), `atrium/shell/tray_match.*`,
+  `atrium/shell/tray_click.h`, `atrium/shell/tray_target.h`,
+  `atrium/shell/tray_pointer.h` and `atrium/shell/tray_image.h`; the
+  shell-session/ownership hardening of `atrium/shell/tray_host.*` also modifies
+  Atrium-derived code.
 
 ## HarmonyOS Sans SC
 

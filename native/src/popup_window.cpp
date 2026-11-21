@@ -18,6 +18,33 @@ constexpr double kCloseMs = 130.0;
 constexpr float kPopResponse = 0.36f;
 constexpr float kPopDamping = 0.62f;
 
+// The glass of the popup centres (Control Center, date/time popup, tray panel) is
+// pinned to the material the user was running, not read back from the settings
+// file: settings.json had the liquid preset with transparency 1, blur 0,
+// refraction 18, edge 18, dispersion 0.30, highlight 0.1974, shadow 0, tint
+// #FFFFFF, saturation 1.15, noise 0 and a 28 DIP bar height. ComputeMaterial's
+// bar form turns those numbers into the shader values below (refraction and edge
+// are capped at 0.6 x / 0.45 x the 28 DIP shape height); the DPI scale is kept so
+// a monitor move or DPI change renders the same material at the same physical
+// thickness. The bar itself still follows the settings file.
+MaterialParams FrozenCentreMaterial(double scale) {
+    MaterialParams m;
+    m.tintMix = 0.0f;
+    m.blurMix = 0.0f;
+    m.blurLod = 1.0f;
+    m.refract = static_cast<float>(16.8 * scale);
+    m.edge = static_cast<float>(12.6 * scale);
+    m.dispersion = 0.30f;
+    m.highlight = 0.1974f;
+    m.shadow = 0.0f;
+    m.saturation = 1.15f;
+    m.noise = 0.0f;
+    m.tintR = 1.0f;
+    m.tintG = 1.0f;
+    m.tintB = 1.0f;
+    return m;
+}
+
 float PopScale(double seconds) {
     constexpr float kFrom = 0.92f;
     constexpr float kTarget = 1.0f;
@@ -224,6 +251,43 @@ bool PopupWindow::OpenPanel(PopupKind kind, RECT anchorScreen, Gpu* gpu, Capture
     return Open(kind, MenuId::None, empty, anchorScreen, gpu, capture, host, ui, icons, monitorRect);
 }
 
+void PopupWindow::RefreshPanel() {
+    if (!visible_ || closing_ || !hwnd_ || !host_) return;
+    // Rebuild the panel for a changed icon list. The pointer may be resting on a cell:
+    // remember which icon that is and keep it highlighted afterwards. Clearing the
+    // hover unconditionally would blink the plate (and send the hosted app a hover
+    // close/open pair) for every background icon update while the panel is open.
+    std::wstring hovered;
+    if (kind_ == PopupKind::Tray && hoverHit_ >= 0 && hoverHit_ < static_cast<int>(hits_.size()) &&
+        hits_[hoverHit_].type == Hit::Type::TrayButton)
+        hovered = TrayIconIdentity(hits_[hoverHit_].trayIcon);
+    const int oldW = contentW_, oldH = contentH_;
+    ComputeContentSize();
+    BuildLayout();
+    hoverHit_ = -1;
+    if (!hovered.empty()) {
+        // The cells may have moved: restore the highlight by identity, not by index.
+        for (size_t i = 0; i < hits_.size(); ++i)
+            if (hits_[i].type == Hit::Type::TrayButton && TrayIconIdentity(hits_[i].trayIcon) == hovered) {
+                hoverHit_ = static_cast<int>(i);
+                break;
+            }
+        if (hoverHit_ < 0 && host_)
+            host_->OnTrayIconHover(nullptr); // the icon it was on disappeared: end the hover
+    }
+    // Only move/resize when the panel's own size changed; a background icon update
+    // must not reallocate the glass surface (that is a visible one-frame flicker).
+    if (contentW_ != oldW || contentH_ != oldH) {
+        PositionAndResize(anchor_);
+        const RECT wr = screenRect();
+        if (surface_) {
+            surface_->SetScreenRect(wr);
+            surface_->ResizeBuffers(wr.right - wr.left, wr.bottom - wr.top);
+        }
+    }
+    Render();
+}
+
 void PopupWindow::PositionAndResize(RECT anchorScreen) {
     const float gap = Dip(kind_ == PopupKind::Menu ? 3 : 4);
     int contentLeft = anchorScreen.left;
@@ -363,13 +427,15 @@ void PopupWindow::BuildLayout() {
         const int header = static_cast<int>(Dip(34));
         const int cellW = (contentW_ - pad * 2) / 5;
         const int cellH = static_cast<int>(Dip(56));
-        const auto hidden = HiddenTray();
-        for (size_t i = 0; i < hidden.size(); ++i) {
+        // One snapshot per layout: the cells drawn and the cells clicked are the
+        // same icons, whatever the model does meanwhile.
+        hiddenTray_ = HiddenTray();
+        for (size_t i = 0; i < hiddenTray_.size(); ++i) {
             const int col = static_cast<int>(i % 5);
             const int row = static_cast<int>(i / 5);
             Hit hit;
             hit.type = Hit::Type::TrayButton;
-            hit.trayId = hidden[i]->id;
+            hit.trayIcon = hiddenTray_[i];
             hit.rect = RECT{inset_ + pad + col * cellW, inset_ + header + row * cellH,
                             inset_ + pad + (col + 1) * cellW, inset_ + header + (row + 1) * cellH};
             hits_.push_back(hit);
@@ -399,31 +465,49 @@ void PopupWindow::BuildLayout() {
     }
 }
 
+MaterialParams PopupWindow::GlassMaterial() const {
+    // The Control Center, the date/time (calendar) popup, the hidden-tray popup and
+    // every menu (the bar's drop-downs, the Apple/Windows menu, the right-click and
+    // tray context menus) use one fixed glass material - the values the user was
+    // running in %LOCALAPPDATA%\SuperMenu\settings.json - so their look cannot drift
+    // when the shared settings change. It is the bar-form material (same
+    // ComputeMaterial mapping, 28 DIP shape height) without the old popup-only
+    // adjustments (extra tint, forced shadow, steeper light, larger edge/refraction
+    // caps); those were the "milky highlight" layer. The other small popups
+    // (volume, notifications, ...) keep the settings-driven panel material.
+    switch (kind_) {
+        case PopupKind::ControlCenter:
+        case PopupKind::Calendar:
+        case PopupKind::Tray:
+        case PopupKind::Menu:
+            return FrozenCentreMaterial(scale_);
+        default:
+            return ComputeMaterial(host_->settings(), scale_, 30.0, true);
+    }
+}
+
 GlassParams PopupWindow::MakeParams() const {
-    const Settings& s = host_->settings();
-    const bool followBar = kind_ == PopupKind::ControlCenter;
-    // The Control Center deliberately reuses the bar's material (including the
-    // barHeight-dependent edge/refraction caps) so the user's glass settings
-    // look identical across the bar and its popovers.
-    MaterialParams m = followBar ? ComputeMaterial(s, scale_, s.barHeight, false)
-                                 : ComputeMaterial(s, scale_, 30.0, true);
+    const bool configuredMaterial =
+        kind_ == PopupKind::ControlCenter || kind_ == PopupKind::Calendar || kind_ == PopupKind::Tray ||
+        kind_ == PopupKind::Menu;
+    MaterialParams m = GlassMaterial();
     GlassParams p{};
     p.radius = std::min(Dip(15), float(std::min(contentW_, contentH_)) * 0.25f);
-    p.edge = followBar ? m.edge : std::min(m.edge, Dip(22));
-    p.refract = followBar ? m.refract : std::min(m.refract, Dip(20));
+    p.edge = configuredMaterial ? m.edge : std::min(m.edge, Dip(22));
+    p.refract = configuredMaterial ? m.refract : std::min(m.refract, Dip(20));
     p.dispersion = m.dispersion;
     p.blurMix = m.blurMix;
-    p.blurLod = std::min(m.blurLod, followBar ? 3.5f : 4.0f);
-    p.tintMix = followBar ? m.tintMix : std::min(0.36f, m.tintMix + 0.04f);
+    p.blurLod = std::min(m.blurLod, configuredMaterial ? 3.5f : 4.0f);
+    p.tintMix = configuredMaterial ? m.tintMix : std::min(0.36f, m.tintMix + 0.04f);
     p.tintR = m.tintR;
     p.tintG = m.tintG;
     p.tintB = m.tintB;
     p.tintA = 1.0f;
     p.highlight = m.highlight;
-    p.shadow = followBar ? m.shadow : std::max(0.28f, m.shadow);
-    p.lightX = followBar ? 0.0f : -0.6f;
-    p.lightY = followBar ? -1.0f : -0.8f;
-    p.inset = followBar ? Pxf(14.0, scale_) : static_cast<float>(inset_);
+    p.shadow = configuredMaterial ? m.shadow : std::max(0.28f, m.shadow);
+    p.lightX = configuredMaterial ? 0.0f : -0.6f;
+    p.lightY = configuredMaterial ? -1.0f : -0.8f;
+    p.inset = configuredMaterial ? Pxf(14.0, scale_) : static_cast<float>(inset_);
     p.noise = m.noise;
     p.vibrancy = m.saturation;
     p.shapeL = static_cast<float>(inset_);
@@ -513,7 +597,7 @@ void PopupWindow::Render() {
     surface_->PrepareBackdrop();
 
     // Ink follows the actual backdrop under this popup.
-    const MaterialParams m = ComputeMaterial(host_->settings(), scale_, 30.0, true);
+    const MaterialParams m = GlassMaterial();
     const float luma = surface_->hasLuma() ? surface_->averageLuma() : 0.5f;
     const float effective = luma * (1.0f - m.tintMix) + 0.92f * m.tintMix;
     float target = 0.5f;
@@ -550,12 +634,14 @@ void PopupWindow::Tick(double nowMs) {
 
 void PopupWindow::BeginClose() {
     if (!visible_ || closing_) return;
+    ClearTrayHover();  // the pointer is no longer resting on a tray icon
     closing_ = true;
     closeStartMs_ = NowMs();
     animating_ = true;
 }
 
 void PopupWindow::CloseNow() {
+    ClearTrayHover();
     if (hwnd_) {
         surface_.reset();
         DestroyWindow(hwnd_);
@@ -566,6 +652,7 @@ void PopupWindow::CloseNow() {
     kind_ = PopupKind::None;
     menuId_ = MenuId::None;
     hits_.clear();
+    hiddenTray_.clear();
 }
 
 bool PopupWindow::UpdateBackdrop() {
@@ -658,7 +745,7 @@ void PopupWindow::OnClick(POINT client) {
             Render();
             break;
         case Hit::Type::TrayButton:
-            host_->OnTrayIconActivated(hit.trayId);
+            host_->OnTrayIconActivated(hit.trayIcon);
             break;
         case Hit::Type::None:
         default:
@@ -744,19 +831,32 @@ LRESULT CALLBACK PopupWindow::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             }
             if (hover != self->hoverHit_) {
                 self->hoverHit_ = hover;
+                if (self->kind_ == PopupKind::Tray) {
+                    // A hosted icon's app is told the pointer rests on it (and, later,
+                    // that it left): the shell's own hover messages.
+                    const atrium::TrayIcon* trayIcon =
+                        hover >= 0 && hover < static_cast<int>(self->hits_.size()) &&
+                                self->hits_[hover].type == Hit::Type::TrayButton
+                            ? &self->hits_[hover].trayIcon
+                            : nullptr;
+                    self->host_->OnTrayIconHover(trayIcon);
+                }
                 self->surface_->Render(self->MakeParams(), [self](ID2D1DeviceContext2* d2d) { self->DrawContent(d2d); });
             }
             return 0;
         }
-        case WM_MOUSELEAVE:
+        case WM_MOUSELEAVE: {
             self->mouseTracking_ = false;
-            if (self->hoverHit_ != -1) {
-                self->hoverHit_ = -1;
+            const bool hadHover = self->hoverHit_ != -1;
+            self->ClearTrayHover();
+            self->hoverHit_ = -1;
+            if (hadHover) {
                 if (self->surface_) {
                     self->surface_->Render(self->MakeParams(), [self](ID2D1DeviceContext2* d2d) { self->DrawContent(d2d); });
                 }
             }
             return 0;
+        }
         case WM_LBUTTONDOWN: {
             self->OnClick(POINT{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)});
             return 0;
@@ -765,7 +865,7 @@ LRESULT CALLBACK PopupWindow::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             const POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
             const Hit hit = self->HitTest(pt);
             if (hit.type == Hit::Type::TrayButton) {
-                self->host_->OnTrayIconContext(hit.trayId);
+                self->host_->OnTrayIconContext(hit.trayIcon);
             }
             return 0;
         }
@@ -867,36 +967,12 @@ void PopupWindow::DrawControlCenter(ID2D1DeviceContext2* d2d) {
     const int topH = 3 * pillH + 2 * pillGap;
     const int rightX = x0 + leftW + colGap;
 
-    const MaterialParams cardMaterial = ComputeMaterial(s, scale_, s.barHeight, false);
-    const float cardAlpha = ink.isDark() ? 0.10f + 0.32f * cardMaterial.tintMix
-                                         : 0.035f + 0.12f * cardMaterial.tintMix;
-    const float sheenAlpha = 0.045f + 0.10f * cardMaterial.highlight;
-    const float rimAlpha = 0.05f + 0.14f * cardMaterial.highlight;
-    auto drawCard = [&](const RECT& r, float radiusOverride = 0.0f) {
-        const float rad = radiusOverride > 0.0f ? radiusOverride : (float(r.bottom) - float(r.top)) * 0.5f;
-        const D2D1_ROUNDED_RECT shape =
-            D2D1::RoundedRect(D2D1::RectF(float(r.left), float(r.top), float(r.right), float(r.bottom)), rad, rad);
-        ComPtr<ID2D1SolidColorBrush> base(ui_->Brush(d2d, D2D1::ColorF(1, 1, 1, cardAlpha)));
-        d2d->FillRoundedRectangle(shape, base.get());
-        D2D1_GRADIENT_STOP stops[2]{};
-        stops[0].position = 0.0f;
-        stops[0].color = D2D1::ColorF(1, 1, 1, sheenAlpha);
-        stops[1].position = 1.0f;
-        stops[1].color = D2D1::ColorF(1, 1, 1, 0.0f);
-        ComPtr<ID2D1GradientStopCollection> collection;
-        d2d->CreateGradientStopCollection(stops, 2, collection.put());
-        if (collection) {
-            ComPtr<ID2D1LinearGradientBrush> sheen;
-            const D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES props = D2D1::LinearGradientBrushProperties(
-                D2D1::Point2F(static_cast<float>(r.left), static_cast<float>(r.top)),
-                D2D1::Point2F(static_cast<float>(r.left), static_cast<float>(r.top) + (r.bottom - r.top) * 0.55f));
-            d2d->CreateLinearGradientBrush(props, collection.get(), sheen.put());
-            if (sheen) d2d->FillRoundedRectangle(shape, sheen.get());
-        }
-        ComPtr<ID2D1SolidColorBrush> line(ui_->Brush(
-            d2d, ink.isDark() ? D2D1::ColorF(0, 0, 0, rimAlpha) : D2D1::ColorF(1, 1, 1, rimAlpha)));
-        d2d->DrawRoundedRectangle(shape, line.get(), 1.0f);
-    };
+    // The floating islands are drawn by the glass shader from the configured
+    // material (p.parts in MakeParams: three pills, the media card and the two
+    // sliders). There is deliberately no extra white plate / sheen / rim painted
+    // on top here: that was the "milky highlight" layer which made these cards
+    // look less transparent than the bar; the configured glass (highlight,
+    // tint, transparency from settings.json) is now the only material.
 
     ComPtr<ID2D1SolidColorBrush> titleBrush(ui_->Brush(d2d, ink.text()));
     ComPtr<ID2D1SolidColorBrush> secondaryBrush(ui_->Brush(d2d, ink.secondary()));
@@ -916,8 +992,6 @@ void PopupWindow::DrawControlCenter(ID2D1DeviceContext2* d2d) {
     };
     for (int i = 0; i < 3; ++i) {
         const int yy = topY + i * (pillH + pillGap);
-        RECT r{x0, yy, x0 + leftW, yy + pillH};
-        drawCard(r);
         const bool active = i == 0 ? wifiOn : i == 1 ? bluetoothOn : focusOn;
         ComPtr<ID2D1SolidColorBrush> iconBrush(ui_->Brush(d2d, D2D1::ColorF(1, 1, 1, active ? 0.95f : 0.72f)));
         ComPtr<ID2D1SolidColorBrush> discBrush(
@@ -957,7 +1031,6 @@ void PopupWindow::DrawControlCenter(ID2D1DeviceContext2* d2d) {
 
     // Right: large now-playing card.
     RECT media{rightX, topY, rightX + rightW, topY + topH};
-    drawCard(media, Dip(26));
     const float mediaLeft = float(media.left);
     const float mediaTop = float(media.top);
     const float mediaRight = float(media.right);
@@ -1053,8 +1126,6 @@ void PopupWindow::DrawControlCenter(ID2D1DeviceContext2* d2d) {
     const int sliderY = topY + topH + gap;
     const int bh = static_cast<int>(Dip(72));
     auto drawSliderCard = [&](bool volume, int y) {
-        RECT r{x0, y, x0 + innerW, y + bh};
-        drawCard(r, Dip(20));
         const int value = volume ? st.volume : brightness_;
         // Text is intentionally 10 px further right than the previous layout.
         ui_->DrawText(d2d, volume ? (zh ? L"声音" : L"Sound") : (zh ? L"显示器" : L"Display"), Dip(12.5),
@@ -1296,28 +1367,44 @@ void PopupWindow::DrawNotifications(ID2D1DeviceContext2* d2d) {
     DrawInfoPanel(d2d);
 }
 
-std::vector<const TrayIcon*> PopupWindow::HiddenTray() const {
-    std::vector<const TrayIcon*> hidden;
+std::vector<atrium::TrayIcon> PopupWindow::HiddenTray() const {
+    std::vector<atrium::TrayIcon> hidden;
     if (!host_) return hidden;
+    const Settings& settings = host_->settings();
     for (const auto& icon : host_->trayIcons()) {
-        if (!IsTrayIconShown(icon, host_->settings())) hidden.push_back(&icon);
+        if (!TrayIconShown(icon, settings)) hidden.push_back(icon);
     }
     return hidden;
 }
 
-ID2D1Bitmap1* PopupWindow::TrayBitmap(ID2D1DeviceContext2* d2d, const TrayIcon& icon) {
-    if (icon.imageId == 0 || icon.pixels.empty() || icon.width <= 0 || icon.height <= 0) return nullptr;
-    auto it = trayBitmaps_.find(icon.imageId);
-    if (it != trayBitmaps_.end()) return it->second.get();
+void PopupWindow::ClearTrayHover() {
+    if (kind_ != PopupKind::Tray) return;
+    const int hit = hoverHit_;
+    hoverHit_ = -1;
+    if (hit < 0 || hit >= static_cast<int>(hits_.size())) return;
+    if (hits_[hit].type != Hit::Type::TrayButton) return;
+    if (host_) host_->OnTrayIconHover(nullptr);
+}
+
+ID2D1Bitmap1* PopupWindow::TrayBitmap(ID2D1DeviceContext2* d2d, const atrium::TrayIcon& icon, bool inked) {
+    const std::shared_ptr<const atrium::IconImage>& image = inked ? icon.inked : icon.image;
+    if (!image || image->Empty() || image->width <= 0 || image->height <= 0) return nullptr;
+    // The model's image version is the renderer's only cache identity.
+    if (icon.imageVersion == 0) return nullptr;
+    auto& cache = inked ? inkedTrayBitmaps_ : trayBitmaps_;
+    if (auto it = cache.find(icon.imageVersion); it != cache.end()) return it->second.get();
+    // A flashing or animated icon gets a new version for every frame: cap the cache
+    // so it cannot grow for the whole session.
+    if (cache.size() >= 256) cache.clear();
     D2D1_BITMAP_PROPERTIES1 props = D2D1::BitmapProperties1(
         D2D1_BITMAP_OPTIONS_NONE,
         D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96.0f, 96.0f);
     ComPtr<ID2D1Bitmap1> bitmap;
-    const HRESULT hr =
-        d2d->CreateBitmap(D2D1::SizeU(static_cast<UINT32>(icon.width), static_cast<UINT32>(icon.height)),
-                          icon.pixels.data(), static_cast<UINT32>(icon.width * 4), props, bitmap.put());
+    const HRESULT hr = d2d->CreateBitmap(
+        D2D1::SizeU(static_cast<UINT32>(image->width), static_cast<UINT32>(image->height)), image->bgra.data(),
+        static_cast<UINT32>(image->width * 4), props, bitmap.put());
     if (FAILED(hr)) return nullptr;
-    auto [ins, ok] = trayBitmaps_.emplace(icon.imageId, std::move(bitmap));
+    auto [ins, ok] = cache.emplace(icon.imageVersion, std::move(bitmap));
     return ins->second.get();
 }
 
@@ -1386,15 +1473,17 @@ void PopupWindow::DrawTray(ID2D1DeviceContext2* d2d) {
                               float(inset_ + contentW_ - pad), float(inset_ + Dip(31))),
                   secondary.get(), DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
 
-    const auto hidden = HiddenTray();
-    if (hidden.empty()) {
+    // The cells drawn are the cells hit-tested: the layout's snapshot of the model.
+    if (hiddenTray_.empty()) {
         ui_->DrawText(d2d, zh ? L"没有隐藏的图标" : L"No hidden icons", Dip(13), DWRITE_FONT_WEIGHT_MEDIUM,
                       D2D1::RectF(float(inset_ + pad), float(inset_ + header), float(inset_ + contentW_ - pad),
                                   float(inset_ + contentH_ - pad)),
                       secondary.get(), DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         return;
     }
-    for (size_t i = 0; i < hidden.size(); ++i) {
+    const bool light = ink.dark > 0.5f;
+    for (size_t i = 0; i < hiddenTray_.size(); ++i) {
+        const atrium::TrayIcon& icon = hiddenTray_[i];
         const int col = static_cast<int>(i % 5);
         const int row = static_cast<int>(i / 5);
         const float left = float(inset_ + pad + col * cellW);
@@ -1408,7 +1497,10 @@ void PopupWindow::DrawTray(ID2D1DeviceContext2* d2d) {
         const float iconBox = Dip(26);
         const float ix = left + (float(cellW) - iconBox) * 0.5f;
         const float iy = top + Dip(7);
-        ID2D1Bitmap1* bitmap = TrayBitmap(d2d, *hidden[i]);
+        // One-shade glyphs follow the popup's ink, as the rest of the panel does.
+        const bool wantInked = icon.inked && icon.inkedOnLight == light;
+        ID2D1Bitmap1* bitmap = wantInked ? TrayBitmap(d2d, icon, true) : nullptr;
+        if (!bitmap) bitmap = TrayBitmap(d2d, icon, false);
         if (bitmap) {
             d2d->DrawBitmap(bitmap, D2D1::RectF(ix, iy, ix + iconBox, iy + iconBox), 0.98f,
                             D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
@@ -1416,12 +1508,13 @@ void PopupWindow::DrawTray(ID2D1DeviceContext2* d2d) {
             ui_->DrawGlyph(d2d, 0xE7C3, iconBox * 1.2f, D2D1::RectF(ix, iy, ix + iconBox, iy + iconBox),
                            secondary.get());
         }
-        std::wstring label = hidden[i]->label.empty() ? (zh ? L"应用" : L"App") : hidden[i]->label;
+        const std::wstring full = TrayIconLabel(icon);
+        std::wstring label = full.empty() ? (zh ? L"应用" : L"App") : full;
         const float labelPx = Dip(10.0);
         while (label.size() > 1 && ui_->Measure(label, labelPx, DWRITE_FONT_WEIGHT_MEDIUM) > cellW - Dip(6)) {
             label.resize(label.size() - 1);
         }
-        if (!hidden[i]->label.empty() && label != hidden[i]->label) label += L"…";
+        if (!full.empty() && label != full) label += L"…";
         ui_->DrawText(d2d, label, labelPx, DWRITE_FONT_WEIGHT_MEDIUM,
                       D2D1::RectF(left + Dip(3), top + Dip(35), left + float(cellW) - Dip(3),
                                   top + float(cellH) - Dip(2)),
@@ -1429,11 +1522,11 @@ void PopupWindow::DrawTray(ID2D1DeviceContext2* d2d) {
     }
 
     // The cells elide long names; show the complete name in the footer while
-    // the pointer is over a cell.
+    // the pointer is over a cell (the app's own tooltip stays with the app).
     std::wstring hoveredName;
-    for (size_t i = 0; i < hits_.size() && i < hidden.size(); ++i) {
+    for (size_t i = 0; i < hits_.size() && i < hiddenTray_.size(); ++i) {
         if (static_cast<int>(i) == hoverHit_ && hits_[i].type == Hit::Type::TrayButton) {
-            hoveredName = hidden[i]->label;
+            hoveredName = TrayIconLabel(hiddenTray_[i]);
             break;
         }
     }

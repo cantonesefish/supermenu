@@ -48,7 +48,7 @@ WPF 需要 `Microsoft.WindowsDesktop.App` 运行时 10；SDK 安装程序默认�
 仓库根目录：
 
 ```powershell
-.\build.ps1 -Version 1.0.0
+.\build.ps1 -Version 1.1.0
 ```
 
 发布脚本会：

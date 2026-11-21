@@ -13,6 +13,7 @@ namespace sm {
 namespace {
 constexpr wchar_t kBarClass[] = L"SuperMenuBarWindow";
 constexpr UINT kAppBarCallback = WM_APP + 22;
+constexpr UINT_PTR kTrayHintTimer = 0x5A48; // hides a temporary tray hint under the bar
 
 bool IsOpenMenu(MenuId id, MenuId open) { return open != MenuId::None && id == open; }
 
@@ -246,6 +247,10 @@ void BarWindow::ApplySettings() {
 
 void BarWindow::Show(bool show) {
     if (!hwnd_) return;
+    if (!show) {
+        HideTrayTooltip();
+        LeaveTrayHover();
+    }
     ShowWindow(hwnd_, show ? SW_SHOWNOACTIVATE : SW_HIDE);
     if (show) {
         PositionWindow();
@@ -328,13 +333,14 @@ void BarWindow::Layout(float width, float barHeight, double scale) {
     std::map<std::wstring, float> oldTrayHover;
     float oldOverflowHover = 0.0f;
     for (const auto& item : items_) {
-        if (item.tray) oldTrayHover[item.trayId] = item.hover;
+        if (item.tray) oldTrayHover[TrayIconIdentity(item.trayIcon)] = item.hover;
         else if (item.overflow) oldOverflowHover = item.hover;
         else oldMenuHover[item.id] = item.hover;
     }
     auto restoreHover = [&](BarItem& item) {
         if (item.tray) {
-            if (auto it = oldTrayHover.find(item.trayId); it != oldTrayHover.end()) item.hover = it->second;
+            if (auto it = oldTrayHover.find(TrayIconIdentity(item.trayIcon)); it != oldTrayHover.end())
+                item.hover = it->second;
         } else if (item.overflow) {
             item.hover = oldOverflowHover;
         } else if (auto it = oldMenuHover.find(item.id); it != oldMenuHover.end()) {
@@ -508,12 +514,13 @@ void BarWindow::Layout(float width, float barHeight, double scale) {
     }
 
     // System tray group: visible (promoted) tray icons sit just left of the
-    // status icons; a native chevron opens the hidden-icon dropdown.
+    // status icons; a native chevron opens the hidden-icon dropdown. Visibility
+    // follows the user's per-record overrides on top of Explorer's own state.
     const auto& tray = host_->trayIcons();
-    std::vector<const TrayIcon*> promoted;
+    std::vector<const atrium::TrayIcon*> promoted;
     int hiddenCount = 0;
     for (const auto& icon : tray) {
-        if (IsTrayIconShown(icon, s)) promoted.push_back(&icon);
+        if (TrayIconShown(icon, s)) promoted.push_back(&icon);
         else ++hiddenCount;
     }
     float cursor = rx;
@@ -521,16 +528,12 @@ void BarWindow::Layout(float width, float barHeight, double scale) {
     const float trayCell = trayIconSize + 8.0f * static_cast<float>(scale);
     const float trayGap = rightGap;
     for (auto it = promoted.rbegin(); it != promoted.rend(); ++it) {
-        const TrayIcon& icon = **it;
+        const atrium::TrayIcon& icon = **it;
         cursor -= trayCell;
         BarItem item;
         item.status = true;
         item.tray = true;
-        item.trayId = icon.id;
-        item.trayLabel = icon.label;
-        item.trayImageId = icon.imageId;
-        item.trayW = icon.width;
-        item.trayH = icon.height;
+        item.trayIcon = icon;  // images are shared; the copy carries the click identity
         item.iconSize = trayIconSize;
         item.plate = D2D1::RectF(cursor, plateY, cursor + trayCell, plateY + plateH);
         item.text = D2D1::RectF(item.plate.left, 0, item.plate.right, barHeight);
@@ -857,7 +860,7 @@ void BarWindow::Render(bool force) {
     animating_ = false;
     for (auto& item : items_) {
         bool hot = false;
-        if (item.tray) hot = hoveredTrayId_ == item.trayId;
+        if (item.tray) hot = hoveredTrayKey_ == TrayIconIdentity(item.trayIcon);
         else if (item.overflow) hot = hoveredOverflow_ || host_->trayOverflowOpen();
         else hot = hovered_ == item.id || IsOpenMenu(item.id, open) ||
                    (item.statusCluster && host_->controlCenterOpen());
@@ -896,18 +899,26 @@ BarWindow::BarItem* BarWindow::FindItem(POINT client) {
     return nullptr;
 }
 
-ID2D1Bitmap1* BarWindow::TrayBitmap(ID2D1DeviceContext2* d2d, const TrayIcon& icon) {
-    if (icon.imageId == 0 || icon.pixels.empty() || icon.width <= 0 || icon.height <= 0) return nullptr;
-    auto it = trayBitmaps_.find(icon.imageId);
-    if (it != trayBitmaps_.end()) return it->second.get();
+ID2D1Bitmap1* BarWindow::TrayBitmap(ID2D1DeviceContext2* d2d, const atrium::TrayIcon& icon, bool inked) {
+    const std::shared_ptr<const atrium::IconImage>& image = inked ? icon.inked : icon.image;
+    if (!image || image->Empty() || image->width <= 0 || image->height <= 0) return nullptr;
+    // The version is the renderer's only cache identity; without one the bitmap
+    // cannot be told apart from another icon's, so fall back to the glyph.
+    if (icon.imageVersion == 0) return nullptr;
+    auto& cache = inked ? inkedTrayBitmaps_ : trayBitmaps_;
+    if (auto it = cache.find(icon.imageVersion); it != cache.end()) return it->second.get();
+    // A flashing or animated icon gets a new version for every frame: without a cap
+    // the cache would keep one bitmap per historical frame for the whole session.
+    if (cache.size() >= 256) cache.clear();
     D2D1_BITMAP_PROPERTIES1 props = D2D1::BitmapProperties1(
         D2D1_BITMAP_OPTIONS_NONE,
         D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96.0f, 96.0f);
     ComPtr<ID2D1Bitmap1> bitmap;
-    HRESULT hr = d2d->CreateBitmap(D2D1::SizeU(static_cast<UINT32>(icon.width), static_cast<UINT32>(icon.height)),
-                                   icon.pixels.data(), static_cast<UINT32>(icon.width * 4), props, bitmap.put());
+    HRESULT hr = d2d->CreateBitmap(
+        D2D1::SizeU(static_cast<UINT32>(image->width), static_cast<UINT32>(image->height)), image->bgra.data(),
+        static_cast<UINT32>(image->width * 4), props, bitmap.put());
     if (FAILED(hr)) return nullptr;
-    auto [ins, ok] = trayBitmaps_.emplace(icon.imageId, std::move(bitmap));
+    auto [ins, ok] = cache.emplace(icon.imageVersion, std::move(bitmap));
     return ins->second.get();
 }
 
@@ -924,8 +935,16 @@ void BarWindow::UpdateTrayTooltip(const BarItem* item) {
     const Settings& s = host_->settings();
     const bool zh = s.language != L"en-US";
     std::wstring text;
+    std::wstring key = L"#overflow";
     if (item->tray) {
-        text = item->trayLabel;
+        // A version 4 app drawing its own tooltip (NIN_POPUPOPEN) must not get a
+        // second one from the bar.
+        if (item->trayIcon.appTooltip) {
+            HideTrayTooltip();
+            return;
+        }
+        text = TrayIconLabel(item->trayIcon);
+        key = TrayIconIdentity(item->trayIcon);
     } else {
         text = zh ? L"隐藏的图标" : L"Hidden icons";
     }
@@ -943,7 +962,7 @@ void BarWindow::UpdateTrayTooltip(const BarItem* item) {
     SendMessageW(tooltip_, TTM_TRACKPOSITION, 0, MAKELPARAM(x, y));
     SendMessageW(tooltip_, TTM_TRACKACTIVATE, TRUE, reinterpret_cast<LPARAM>(&info));
     ShowWindow(tooltip_, SW_SHOWNOACTIVATE);
-    tooltipKey_ = item->tray ? item->trayId : L"#overflow";
+    tooltipKey_ = key;
 }
 
 void BarWindow::HideTrayTooltip() {
@@ -959,18 +978,16 @@ void BarWindow::HideTrayTooltip() {
 }
 
 void BarWindow::DrawTrayIcon(ID2D1DeviceContext2* d2d, const BarItem& item, ID2D1Brush* fallbackBrush) {
-    const auto& tray = host_->trayIcons();
-    const TrayIcon* icon = nullptr;
-    for (const auto& candidate : tray) {
-        if (candidate.id == item.trayId) {
-            icon = &candidate;
-            break;
-        }
-    }
+    const atrium::TrayIcon& icon = item.trayIcon;
     const float box = item.iconSize;
     const float x = (item.plate.left + item.plate.right - box) * 0.5f;
     const float y = (static_cast<float>(barHeight_) - box) * 0.5f;
-    ID2D1Bitmap1* bitmap = icon ? TrayBitmap(d2d, *icon) : nullptr;
+    // A one-shade glyph gets the ink the bar has at the tray area: the model's
+    // inked copy is drawn when its target backdrop matches the current ink.
+    const bool light = inkRight_ > 0.5f;
+    const bool wantInked = icon.inked && icon.inkedOnLight == light;
+    ID2D1Bitmap1* bitmap = wantInked ? TrayBitmap(d2d, icon, true) : nullptr;
+    if (!bitmap) bitmap = TrayBitmap(d2d, icon, false);
     if (bitmap) {
         d2d->DrawBitmap(bitmap, D2D1::RectF(x, y, x + box, y + box), 0.96f,
                         D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
@@ -1000,6 +1017,69 @@ RECT BarWindow::plateScreenRect(MenuId id) const {
     return r;
 }
 
+RECT BarWindow::trayAreaScreenRect() const {
+    bool any = false;
+    float left = 0, right = 0, top = 0, bottom = 0;
+    for (const auto& item : items_) {
+        if (!item.tray && !item.overflow) continue;
+        if (!any) {
+            left = item.plate.left;
+            right = item.plate.right;
+            top = item.plate.top;
+            bottom = item.plate.bottom;
+            any = true;
+        } else {
+            left = std::min(left, item.plate.left);
+            right = std::max(right, item.plate.right);
+            top = std::min(top, item.plate.top);
+            bottom = std::max(bottom, item.plate.bottom);
+        }
+    }
+    if (any) return ToScreen(D2D1::RectF(left, top, right, bottom));
+    // No mirrored icon right now: the anchor is where the tray area goes anyway
+    // (the right side of the bar), so Shell_NotifyIconGetRect keeps a sane place.
+    const float rightEdge = surface_ ? static_cast<float>(surface_->width()) : static_cast<float>(monitor_.rect.right - monitor_.rect.left);
+    const float margin = Pxf(24.0, gpu_ ? gpu_->scale() : 1.0);
+    const float width = Pxf(22.0, gpu_ ? gpu_->scale() : 1.0);
+    RECT fallback{};
+    fallback.left = monitor_.rect.left + static_cast<LONG>(rightEdge - margin - width);
+    fallback.right = monitor_.rect.left + static_cast<LONG>(rightEdge - margin);
+    fallback.top = monitor_.rect.top;
+    fallback.bottom = monitor_.rect.top + static_cast<LONG>(barHeight_);
+    return fallback;
+}
+
+void BarWindow::ShowTrayHint(const std::wstring& text) {
+    if (!tooltip_ || !hwnd_ || text.empty()) return;
+    TOOLINFOW info{};
+    info.cbSize = sizeof(info);
+    info.uFlags = TTF_TRACK | TTF_ABSOLUTE;
+    info.hwnd = hwnd_;
+    info.uId = 1;
+    info.lpszText = const_cast<LPWSTR>(text.c_str());
+    SendMessageW(tooltip_, TTM_UPDATETIPTEXTW, 0, reinterpret_cast<LPARAM>(&info));
+    const RECT area = trayAreaScreenRect();
+    int x = area.left;
+    const int y = area.bottom + 2;
+    if (surface_) {
+        const int limit = static_cast<int>(monitor_.rect.left) + static_cast<int>(surface_->width()) -
+                          Px(220.0, gpu_ ? gpu_->scale() : 1.0);
+        x = std::min(x, limit);
+    }
+    x = std::max(x, static_cast<int>(monitor_.rect.left) + 8);
+    SendMessageW(tooltip_, TTM_TRACKPOSITION, 0, MAKELPARAM(x, y));
+    SendMessageW(tooltip_, TTM_TRACKACTIVATE, TRUE, reinterpret_cast<LPARAM>(&info));
+    ShowWindow(tooltip_, SW_SHOWNOACTIVATE);
+    tooltipKey_ = L"#hint";
+    if (hwnd_) SetTimer(hwnd_, kTrayHintTimer, 2600, nullptr);
+}
+
+void BarWindow::LeaveTrayHover() {
+    if (hoveredTrayKey_.empty()) return;
+    hoveredTrayKey_.clear();
+    if (host_) host_->OnTrayIconHover(nullptr);
+}
+
 LRESULT CALLBACK BarWindow::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     auto* self = reinterpret_cast<BarWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     if (!self) return DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -1020,13 +1100,19 @@ LRESULT CALLBACK BarWindow::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             const POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
             BarItem* item = self->FindItem(pt);
             MenuId menu = MenuId::None;
-            std::wstring trayId;
+            std::wstring trayKey;
+            const atrium::TrayIcon* trayIcon = nullptr;
             bool overflow = false;
             int statusPart = -1;
             if (item) {
-                if (item->tray) trayId = item->trayId;
-                else if (item->overflow) overflow = true;
-                else menu = item->id;
+                if (item->tray) {
+                    trayKey = TrayIconIdentity(item->trayIcon);
+                    trayIcon = &item->trayIcon;
+                } else if (item->overflow) {
+                    overflow = true;
+                } else {
+                    menu = item->id;
+                }
                 if (item->statusCluster) {
                     for (size_t i = 0; i < item->hoverParts.size(); ++i) {
                         const auto& part = item->hoverParts[i];
@@ -1042,9 +1128,14 @@ LRESULT CALLBACK BarWindow::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 self->hoveredStatusPart_ = statusPart;
                 self->contentDirty_ = true;
             }
-            if (menu != self->hovered_ || trayId != self->hoveredTrayId_ || overflow != self->hoveredOverflow_) {
+            if (menu != self->hovered_ || trayKey != self->hoveredTrayKey_ || overflow != self->hoveredOverflow_) {
+                // The tray icon under the pointer changed: tell the model so a hosted
+                // app gets the shell's own arrival/popup/close hover messages.
+                if (trayKey != self->hoveredTrayKey_) {
+                    self->hoveredTrayKey_ = trayKey;
+                    self->host_->OnTrayIconHover(trayIcon);
+                }
                 self->hovered_ = menu;
-                self->hoveredTrayId_ = trayId;
                 self->hoveredOverflow_ = overflow;
                 self->contentDirty_ = true;
                 self->host_->OnBarHover(menu);
@@ -1062,9 +1153,9 @@ LRESULT CALLBACK BarWindow::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             self->mouseTracking_ = false;
             self->HideTrayTooltip();
             self->hoveredStatusPart_ = -1;
-            if (self->hovered_ != MenuId::None || !self->hoveredTrayId_.empty() || self->hoveredOverflow_) {
+            self->LeaveTrayHover();
+            if (self->hovered_ != MenuId::None || self->hoveredOverflow_) {
                 self->hovered_ = MenuId::None;
-                self->hoveredTrayId_.clear();
                 self->hoveredOverflow_ = false;
                 self->contentDirty_ = true;
                 self->host_->OnBarHover(MenuId::None);
@@ -1076,7 +1167,7 @@ LRESULT CALLBACK BarWindow::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             self->HideTrayTooltip();
             BarItem* item = self->FindItem(pt);
             if (item && item->tray) {
-                self->host_->OnTrayIconActivated(item->trayId);
+                self->host_->OnTrayIconActivated(item->trayIcon);
             } else if (item && item->overflow) {
                 self->host_->OnTrayOverflow(self->ToScreen(item->plate));
             } else if (item) {
@@ -1094,12 +1185,19 @@ LRESULT CALLBACK BarWindow::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             ClientToScreen(hwnd, &pt);
 
             if (item && item->tray) {
-                self->host_->OnTrayIconContext(item->trayId);
+                self->host_->OnTrayIconContext(item->trayIcon);
             } else {
                 self->host_->OnBarContextMenu(pt);
             }
             return 0;
         }
+        case WM_TIMER:
+            if (wParam == kTrayHintTimer) {
+                KillTimer(hwnd, kTrayHintTimer);
+                if (self->tooltipKey_ == L"#hint") self->HideTrayTooltip();
+                return 0;
+            }
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
         case WM_APP + 88:
             self->host_->OnOpenSettings();
             return 0;

@@ -1,9 +1,11 @@
 cmake_minimum_required(VERSION 3.25)
-project(SuperMenu VERSION 1.0.0 LANGUAGES CXX RC)
+project(SuperMenu VERSION 1.1.0 LANGUAGES CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+option(SUPERMENU_BUILD_TESTS "Build native tray regression checks and probes" OFF)
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
@@ -17,6 +19,12 @@ file(MAKE_DIRECTORY ${GENERATED_DIR})
 file(READ ${SHADER_DIR}/glass.hlsl GLASS_HLSL_SOURCE)
 configure_file(${SHADER_DIR}/glass_shader_data.h.in ${GENERATED_DIR}/glass_shader_data.h @ONLY)
 
+# The build version is defined once in this project() line. The generated header
+# feeds the startup log and the About dialog, and the generated .rc carries the
+# same numbers into the executable's version resource.
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/cmake/supermenu_version.h.in ${GENERATED_DIR}/supermenu_version.h @ONLY)
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/resources/app.rc.in ${GENERATED_DIR}/app.rc @ONLY)
+
 add_executable(SuperMenuBar WIN32
     src/main.cpp
     src/app.cpp
@@ -26,10 +34,11 @@ add_executable(SuperMenuBar WIN32
     src/settings.cpp
     src/json.cpp
     src/log.cpp
-    src/tray.cpp
     src/atrium/log.cpp
     src/atrium/shell/shell_icon.cpp
     src/atrium/shell/tray_host.cpp
+    src/atrium/shell/tray_model.cpp
+    src/atrium/shell/tray_match.cpp
     src/gpu.cpp
     src/capture.cpp
     src/glass_surface.cpp
@@ -37,7 +46,7 @@ add_executable(SuperMenuBar WIN32
     src/media_monitor.cpp
     src/ui_util.cpp
     src/icons.cpp
-    resources/app.rc
+    ${GENERATED_DIR}/app.rc
 )
 
 target_include_directories(SuperMenuBar PRIVATE
@@ -54,7 +63,7 @@ target_compile_definitions(SuperMenuBar PRIVATE
 
 target_compile_options(SuperMenuBar PRIVATE
     -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type
-    -Wno-unused-function
+    -Wno-unused-function -Wno-missing-field-initializers
     -municode -finput-charset=UTF-8 -fexec-charset=UTF-8)
 
 target_link_options(SuperMenuBar PRIVATE -static -municode -mwindows)
@@ -63,6 +72,7 @@ target_link_libraries(SuperMenuBar PRIVATE
     d3d11 dxgi d2d1 dwrite dcomp d3dcompiler
     windowscodecs ole32 oleaut32 uuid
     user32 gdi32 shell32 shlwapi dwmapi version propsys advapi32 comctl32 imm32
+    uiautomationcore
     wlanapi iphlpapi dxva2 powrprof wbemuuid shcore wevtapi taskschd
 )
 
@@ -81,3 +91,8 @@ add_custom_command(TARGET SuperMenuBar POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SuperMenuBar> ${OUT_DIR}/SuperMenuBar.exe
     VERBATIM
 )
+
+if(SUPERMENU_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()

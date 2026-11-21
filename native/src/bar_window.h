@@ -7,7 +7,7 @@
 #include "menu.h"
 #include "settings.h"
 #include "system_status.h"
-#include "tray.h"
+#include "tray_view.h"
 #include "ui_util.h"
 #include "icons.h"
 
@@ -30,9 +30,14 @@ public:
     virtual bool popupVisible() const = 0;
     virtual bool controlCenterOpen() const = 0;
     virtual bool trayOverflowOpen() const = 0;
-    virtual const std::vector<TrayIcon>& trayIcons() const = 0;
-    virtual void OnTrayIconActivated(const std::wstring& id) = 0;
-    virtual void OnTrayIconContext(const std::wstring& id) = 0;
+    virtual const std::vector<atrium::TrayIcon>& trayIcons() const = 0;
+    // Screen rect of the bar's tray area: what apps asking Shell_NotifyIconGetRect
+    // are told (TrayModel::SetHostPlaces).
+    virtual RECT trayAreaScreenRect() const = 0;
+    virtual void OnTrayIconActivated(const atrium::TrayIcon& icon) = 0;
+    virtual void OnTrayIconContext(const atrium::TrayIcon& icon) = 0;
+    // The pointer rests on `icon`, or on no tray icon (nullptr): native hover.
+    virtual void OnTrayIconHover(const atrium::TrayIcon* icon) = 0;
     virtual void OnTrayOverflow(RECT anchorScreen) = 0;
     virtual void OnDisplayChanged() = 0;
     virtual void OnOpenSettings() = 0;
@@ -68,6 +73,11 @@ public:
     int shadowPadPx() const { return shadowPad_; }
     RECT plateScreenRect(MenuId id) const;
     RECT windowScreenRect() const;
+    // The on-screen area of the mirrored tray icons (with the overflow chevron when
+    // it is shown), for TrayModel::SetHostPlaces.
+    RECT trayAreaScreenRect() const;
+    // A short transient hint under the bar (the model asked for the user's help).
+    void ShowTrayHint(const std::wstring& text);
     const std::vector<MenuModel>& topMenus() const { return topMenus_; }
 
     static LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
@@ -86,11 +96,10 @@ private:
         bool tray = false;
         bool overflow = false;
         bool statusCluster = false;
-        std::wstring trayId;
+        // A mirrored notification-area icon: the model's icon by value (its images
+        // are shared pointers, so a copy is cheap and keeps the click identity).
+        atrium::TrayIcon trayIcon;
         std::wstring tooltip;
-        std::wstring trayLabel;
-        uint64_t trayImageId = 0;
-        int trayW = 0, trayH = 0;
         float hover = 0;
         std::vector<D2D1_RECT_F> hoverParts;  // per-glyph hover plates in the status cluster
         bool showBatteryPercent = false;
@@ -106,10 +115,11 @@ private:
     GlassParams MakeParams() const;
     void PositionWindow();
     RECT ToScreen(const D2D1_RECT_F& r) const;
-    ID2D1Bitmap1* TrayBitmap(ID2D1DeviceContext2* d2d, const TrayIcon& icon);
+    ID2D1Bitmap1* TrayBitmap(ID2D1DeviceContext2* d2d, const atrium::TrayIcon& icon, bool inked);
     void DrawTrayIcon(ID2D1DeviceContext2* d2d, const BarItem& item, ID2D1Brush* fallbackBrush);
     void UpdateTrayTooltip(const BarItem* item);
     void HideTrayTooltip();
+    void LeaveTrayHover();
 
     HINSTANCE hinst_ = nullptr;
     HWND hwnd_ = nullptr;
@@ -125,10 +135,11 @@ private:
     std::vector<MenuModel> topMenus_;
     std::vector<BarItem> items_;
     MenuId hovered_ = MenuId::None;
-    std::wstring hoveredTrayId_;
+    std::wstring hoveredTrayKey_;  // TrayIconIdentity of the tray icon under the pointer
     bool hoveredOverflow_ = false;
     int hoveredStatusPart_ = -1;
     std::map<uint64_t, ComPtr<ID2D1Bitmap1>> trayBitmaps_;
+    std::map<uint64_t, ComPtr<ID2D1Bitmap1>> inkedTrayBitmaps_;
     UINT barHeight_ = 28;
     int shadowPad_ = 16;
     bool mouseTracking_ = false;

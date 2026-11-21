@@ -9,7 +9,7 @@
 #include "menu.h"
 #include "settings.h"
 #include "system_status.h"
-#include "tray.h"
+#include "tray_view.h"
 #include "ui_util.h"
 
 #include <algorithm>
@@ -31,11 +31,13 @@ public:
     virtual void OnPopupBrightness(int percent) = 0;
     virtual void OnPopupMute() = 0;
     virtual void OnPopupCloseRequested() = 0;
-    virtual const std::vector<TrayIcon>& trayIcons() const = 0;
+    virtual const std::vector<atrium::TrayIcon>& trayIcons() const = 0;
     virtual const MediaInfo& mediaInfo() const = 0;
     virtual bool focusOn() const = 0;
-    virtual void OnTrayIconActivated(const std::wstring& id) = 0;
-    virtual void OnTrayIconContext(const std::wstring& id) = 0;
+    virtual void OnTrayIconActivated(const atrium::TrayIcon& icon) = 0;
+    virtual void OnTrayIconContext(const atrium::TrayIcon& icon) = 0;
+    // The pointer rests on `icon`, or on no tray icon (nullptr): native hover.
+    virtual void OnTrayIconHover(const atrium::TrayIcon* icon) = 0;
 };
 
 class PopupWindow {
@@ -49,6 +51,9 @@ public:
               PopupHost* host, Ui* ui, Icons* icons, const RECT& monitorRect);
     bool OpenPanel(PopupKind kind, RECT anchorScreen, Gpu* gpu, Capture* capture, PopupHost* host, Ui* ui,
                    Icons* icons, const RECT& monitorRect);
+    // Re-reads the host's current data (the hidden tray icons) and repaints without
+    // closing: the model posts list changes while the panel is open.
+    void RefreshPanel();
     void BeginClose();
     void CloseNow();
     void SetBrightness(int percent) { brightness_ = std::clamp(percent, 0, 100); }
@@ -82,7 +87,9 @@ private:
         Command command = CmdNone;
         int value = 0;
         std::wstring uri;  // button target
-        std::wstring trayId;
+        // A mirrored hidden tray icon: the model's identity by value so a click
+        // passes exactly the icon the popup drew, never a label or a position.
+        atrium::TrayIcon trayIcon;
     };
 
     bool CreateWindowOnly(Gpu*, Capture*, PopupHost*, Ui*, Icons*, const RECT& monitorRect);
@@ -97,14 +104,19 @@ private:
     void DrawVolumePanel(ID2D1DeviceContext2* d2d);
     void DrawNotifications(ID2D1DeviceContext2* d2d);
     void DrawTray(ID2D1DeviceContext2* d2d);
-    ID2D1Bitmap1* TrayBitmap(ID2D1DeviceContext2* d2d, const TrayIcon& icon);
+    ID2D1Bitmap1* TrayBitmap(ID2D1DeviceContext2* d2d, const atrium::TrayIcon& icon, bool inked);
     ID2D1Bitmap1* MediaCoverBitmap(ID2D1DeviceContext2* d2d, const MediaInfo& media);
     ID2D1Bitmap1* MediaAppIconBitmap(ID2D1DeviceContext2* d2d, const MediaInfo& media);
-    std::vector<const TrayIcon*> HiddenTray() const;
+    // The model's hidden (not promoted / overridden) icons; a copy for this layout.
+    std::vector<atrium::TrayIcon> HiddenTray() const;
+    void ClearTrayHover();
     Hit HitTest(POINT client) const;
     void OnClick(POINT client);
     void SetSliderFromPoint(POINT client, bool volume);
     GlassParams MakeParams() const;
+    // The configured glass material for this popover kind (the bar's values for the
+    // control center, calendar and tray panels).
+    MaterialParams GlassMaterial() const;
     int ContentLeft() const { return inset_; }
     int ContentTop() const { return inset_; }
     float Dip(double v) const { return static_cast<float>(Pxf(v, scale_)); }
@@ -130,7 +142,9 @@ private:
     std::unique_ptr<GlassSurface> surface_;
     std::vector<Hit> hits_;
     std::vector<RECT> ccCardRects_;  // window-local glass/hit islands (no outer container)
+    std::vector<atrium::TrayIcon> hiddenTray_;  // the hidden icons this layout drew
     std::map<uint64_t, ComPtr<ID2D1Bitmap1>> trayBitmaps_;
+    std::map<uint64_t, ComPtr<ID2D1Bitmap1>> inkedTrayBitmaps_;
     ComPtr<ID2D1Bitmap1> mediaCoverBitmap_;
     unsigned long long mediaCoverRevision_ = 0;
     ComPtr<ID2D1Bitmap1> mediaAppIconBitmap_;

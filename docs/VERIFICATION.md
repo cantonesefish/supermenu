@@ -12,7 +12,7 @@ WindowsDesktop.App 10.0.15. Date: 2026-11-19.
 - `SuperMenuBar.exe` is statically linked against the MinGW runtime (−static), ~4.09 MB
   (the media monitor's WIC/file parsing pulls in more static runtime than before);
   no `libstdc++-6.dll` / `libwinpthread-1.dll` needed.
-- `SuperMenuBar.exe` resources: icon 101 (48×48 extract), embedded VersionInfo 1.0.0.0.
+- `SuperMenuBar.exe` resources: icon 101 (48×48 extract), embedded VersionInfo 1.1.0.0.
 - Settings app: clean WPF build and publish, `net10.0-windows`, x64, no NuGet packages.
   Its own `--selftest` reports **27/27** checks: settings round-trip, clamping, bad JSON,
   actual executable icons via `ExtractIconEx`, presets, private HarmonyOS Sans SC, `logoStyle`,
@@ -111,6 +111,24 @@ WindowsDesktop.App 10.0.15. Date: 2026-11-19.
 | Leftmost logo option | PASS (`logoStyle=apple|windows|windows-mono`; native setting reload + Windows 11 vector mark colored/ink; settings segmented control + live preview, 27/27 selftest, all 38 schema keys) |
 | Atrium overlay fullscreen false-positive | PASS (AtriumSurface is tool-window/no-activate; no longer hides the bar; bar stays visible over Atrium) |
 
+## 2026-11-21 托盘重构（atrium::TrayModel）
+
+Windows 11 build 26300 实机验证；架构、点击分发与完整边界见 `docs/TRAY.md`，
+根因与方案见 `docs/research/tray-refactor.md`。本节结论取代本文件 2026-11-19 记录中
+旧 `TrayReader` 只读镜像/`overflowProxy` 相关条目（保留为历史记录）。
+
+| 检查 | 结果 |
+|---|---|
+| native Release 构建 | PASS（新托盘模块与迁移后的 app/bar/popup 编译、链接通过） |
+| 托盘单元测试 | PASS（`ctest --test-dir native/build` 4/4；共 137 checks：tray_match 22、tray_click 60、tray_protocol 15、tray_pointer 40） |
+| Host 模式实机 | PASS（恰好 1 次 `TaskbarCreated` 广播、0 让位、0 “in front again”、0 Explorer 重启；旧日志为 937/928/925。read-back 37 记录 → 15 存活图标、0 未知占位；顶栏 1 promoted Tailscale + chevron，隐藏面板 13 = 15−1−本程序图标） |
+| 原生点击 | PASS（promoted 左键打开 Tailscale 真实 Win32 菜单；promoted 右键、隐藏图标（华为云盘、SZU 网络守护）左/右键与双击续发均记录原生回调与 `-> sent`） |
+| read-back 回退 | PASS（无 Host 探针：Tailscale UIA `ShowContextMenu` → `uia-context-menu ... observed=1`，result=observed） |
+| 与 Atrium 共存 | PASS（启动 1 次广播；一次接管尝试成功；z-order SuperMenu → Atrium → Explorer；0 让位/0 抢回/0 重启；Atrium 同窗口仅 1 次 “left there”、0 次 “in front again”；点击仍原生；read-back 16 图标（含 Atrium），面板 14 隐藏 + 1 promoted；两个提升权限应用按 GUID/HWND 合并、未重复） |
+| 收尾 | PASS（重启安装版 SuperMenu 与 Atrium；登录计划任务指回 `C:\fish\SuperMenu\SuperMenuBar.exe`） |
+
+Win10 经典 toolbar 路径未在本机实机验证。
+
 ## Known residual limitations
 
 - A display mode/DPI/hot-plug change asks for a restart (single-display design).
@@ -119,14 +137,12 @@ WindowsDesktop.App 10.0.15. Date: 2026-11-19.
   wallpaper backdrop.
 - Settings app remains dark-themed by design; only the bar follows `theme`.
 - Notification panel is not connected to the Windows notification store.
-- System tray data is a read-only mirror over Explorer's persisted `NotifyIconSettings`
-  plus `Shell_NotifyIconGetRect` liveness. Icons with no GUID/UID or no persisted record
-  cannot be enumerated through this public path (Atrium's UIA live-button path covers
-  more cases when Explorer's taskbar XAML is materialized). Clicking a mirrored icon
-  activates or launches its executable; native tray context menus cannot be replayed.
-  Live *status overlays* drawn by the app into its HICON (unread badges, VPN state,
-  charging animations) remain unavailable without a tray host/injection; the mirror uses
-  the running program's actual application icon when possible.
+- 托盘：UIA 结构未公开且随 Windows 版本/任务栏形态变化；隐藏溢出按钮只在面板打开后
+  物化（平时由存活注册表记录补充）；v4 应用在不再次 `NIM_SETVERSION` 时可能按 version 0
+  编码点击；提升权限应用可能拒绝宿主回调（回退 read-back）；顽固的其他 tray host 只做
+  一次接管尝试，失败后本次会话让位并只用 read-back；Explorer 自己的系统图标与 SuperMenu
+  自身图标不参与接管；XAML 没有原生双击 Pattern（第二击为第二次 Invoke）；Win10 经典
+  toolbar 路径未在本机实机验证。详见 `docs/TRAY.md` 的已知边界。
 - `trayShow` / `trayHide` are keyed by Explorer record ID; if Explorer rebuilds a record,
   the stale override is ignored and should be refreshed in the settings list.
 - Brightness uses DDC/CI on the primary monitor with WMI fallback; some monitors or

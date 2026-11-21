@@ -1,8 +1,9 @@
 #include "app.h"
 
 #include "atrium/shell/shell_taskbar.h"
-#include "atrium/shell/tray_protocol.h"
 #include "json.h"
+#include "supermenu_version.h"
+#include "tray_view.h"
 
 #include <dwmapi.h>
 #include <shellapi.h>
@@ -21,7 +22,9 @@ constexpr UINT kTrayClosePopup = WM_APP + 90;
 constexpr UINT kTrayKey = WM_APP + 92;
 constexpr UINT kTimedMessage = WM_APP + 93;
 constexpr UINT kSettingsMessage = WM_APP + 94;
-constexpr UINT kTrayHostChanged = WM_APP + 96;
+// TrayModel's event message: wParam 0 = list changed, 1 = app response observed,
+// 2 = system tray opened, 3 = needs the user, 4 = accepted/unconfirmed (no retry).
+constexpr UINT kTrayModelEvent = WM_APP + 97;
 constexpr UINT_PTR kTickTimer = 1;
 constexpr int kTrayId = 1;
 
@@ -205,28 +208,6 @@ void WaitForShellReady() {
     Log(L"startup: shell waited %d ms (ready=%d)", elapsed, ShellReady() ? 1 : 0);
 }
 
-// Tray records only expose enough identity to ask Explorer where the real icon
-// is. Forward the click there so left-click opens the app flyout and right-click
-// opens the app's own notification-area menu. Falls back to launching the exe
-// when the taskbar is hidden and no usable screen rect exists.
-void ClickTrayIcon(const TrayIcon& icon, bool rightButton) {
-    if (!icon.hasScreenRect) {
-        ActivateOrLaunchExecutable(icon.exe);
-        return;
-    }
-    const int x = (icon.screenRect.left + icon.screenRect.right) / 2;
-    const int y = (icon.screenRect.top + icon.screenRect.bottom) / 2;
-    POINT old{};
-    GetCursorPos(&old);
-    SetCursorPos(x, y);
-    INPUT inputs[2]{};
-    for (auto& input : inputs) input.type = INPUT_MOUSE;
-    inputs[0].mi.dwFlags = rightButton ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_LEFTDOWN;
-    inputs[1].mi.dwFlags = rightButton ? MOUSEEVENTF_RIGHTUP : MOUSEEVENTF_LEFTUP;
-    SendInput(2, inputs, sizeof(INPUT));
-    SetCursorPos(old.x, old.y);
-}
-
 }  // namespace
 
 App::~App() { Shutdown(); }
@@ -257,15 +238,6 @@ bool App::Initialize() {
     // GPU/capture initialization runs while Explorer is still starting, so a
     // logon-task launch is ready to publish the bar the instant the shell exists.
     WaitForShellReady();
-    // The tray records must be available before the bar's first layout.
-    tray_.Refresh();
-    WriteTrayLiveFile();
-    lastTrayRefreshMs_ = NowMs();
-    {
-        int promoted = 0, hidden = 0;
-        for (const auto& icon : tray_.icons()) (IsTrayIconShown(icon, settings_) ? promoted : hidden)++;
-        Log(L"app: system tray records=%zu (promoted=%d hidden=%d)", tray_.icons().size(), promoted, hidden);
-    }
     bar_ = std::make_unique<BarWindow>();
     if (!bar_->Create(hinst_, &gpu_, &capture_, this, gpu_.monitor())) {
         MessageBoxW(nullptr, L"SuperMenu could not create its menu bar window.", L"SuperMenu",
@@ -284,15 +256,18 @@ bool App::Initialize() {
     bar_->Render(true);
     lastBarPointerMs_ = NowMs();
     CreateTray();
-    // Atrium's tray host: receive the real Shell_NotifyIcon stream on a hidden
-    // Shell_TrayWnd ahead of Explorer's, forward every call to Explorer, and use
-    // the captured HICONs/callback messages for live icons and native clicks.
-    trayHost_ = std::make_unique<atrium::TrayHost>(trayHwnd_, kTrayHostChanged);
-    tray_.SetHost(trayHost_.get());
-    tray_.Refresh();
-    WriteTrayLiveFile();
+    // One tray model: its worker reads Explorer's notification area back (UI
+    // Automation + NotifyIconSettings + Shell_NotifyIconGetRect) while its host
+    // receives the apps' Shell_NotifyIcon calls on a hidden Shell_TrayWnd and
+    // forwards them to Explorer. Both sources are merged by identity; the model
+    // posts kTrayModelEvent here when the list or a click's outcome changes.
+    // SuperMenu's own icon was registered by CreateTray() above.
+    tray_ = std::make_unique<atrium::TrayModel>(trayHwnd_, kTrayModelEvent);
+    tray_->SetHosting(true);
+    tray_->Refresh();
     lastTrayRefreshMs_ = NowMs();
-    Log(L"tray host: running=%d", trayHost_->Running() ? 1 : 0);
+    if (bar_) tray_->SetHostPlaces(bar_->trayAreaScreenRect());
+    Log(L"tray model: hosting=%d yielded=%d", tray_->Hosting() ? 1 : 0, tray_->Yielded() ? 1 : 0);
     ApplyLaunchAtLogin();
     media_.Start();
     StartHardwareWorker();
@@ -310,8 +285,7 @@ void App::Shutdown() {
     StopHardwareWorker();
     RemoveHooks();
     popup_.CloseNow();
-    tray_.SetHost(nullptr);
-    trayHost_.reset();
+    tray_.reset();  // stops the model's worker and its tray host
     DestroyTray();
     if (bar_) {
         bar_->Destroy();
@@ -517,6 +491,8 @@ void App::ClosePopup() {
     if (bar_) {
         bar_->Invalidate();
         RenderBar();
+        // The tray area is the sensible place again once the popup is gone.
+        if (tray_) tray_->SetHostPlaces(bar_->trayAreaScreenRect());
     }
 }
 
@@ -620,44 +596,23 @@ bool App::trayOverflowOpen() const {
 }
 
 void App::RefreshTray(bool force) {
+    // The model refreshes asynchronously; a changed list arrives later as a
+    // kTrayModelEvent 0 message, so there is no changed result to inspect here.
     const double now = NowMs();
     if (!force && now - lastTrayRefreshMs_ < 2000.0) return;
     lastTrayRefreshMs_ = now;
-    const bool changed = tray_.Refresh();
-    WriteTrayLiveFile();
-    if (!changed) return;
-    if (popup_.IsVisible() && popup_.kind() == PopupKind::Tray) ClosePopup();
-    if (bar_) {
-        bar_->Invalidate();
-        RenderBar();
-    }
-}
-
-void App::RefreshTrayFromHost() {
-    const double now = NowMs();
-    if (now - lastTrayRefreshMs_ < 100.0) return;
-    lastTrayRefreshMs_ = now;
-    if (!tray_.Refresh()) return;
-    WriteTrayLiveFile();
-    if (bar_) {
-        bar_->Invalidate();
-        RenderBar();
-    }
-    if (popup_.IsVisible() && !popup_.closing()) popup_.Render();
+    if (tray_) tray_->Refresh();
 }
 
 void App::WriteTrayLiveFile() {
     // The settings app reads this small snapshot to show only icons that are
     // currently live, instead of every historical NotifyIconSettings record.
     std::string text;
-    for (const auto& icon : tray_.icons()) {
-        // Settings edits registry records by their numeric id. Host-only icons
-        // (e.g. "guid:{...}") are shown in the bar but cannot be overridden here.
-        if (icon.id.empty() ||
-            !std::all_of(icon.id.begin(), icon.id.end(), [](wchar_t ch) { return ch >= L'0' && ch <= L'9'; })) {
-            continue;
-        }
-        for (wchar_t ch : icon.id) text.push_back(static_cast<char>(ch));
+    for (const auto& icon : trayIconsCache_) {
+        // Settings edits registry records by their numeric id. Run-only hosted
+        // icons have no record key and cannot be overridden there.
+        if (!TrayIconRecordNumber(icon)) continue;
+        for (wchar_t ch : icon.recordKey) text.push_back(static_cast<char>(ch));
         text.push_back('\n');
     }
     const std::wstring path = SettingsDirectory() + L"\\tray-live.txt";
@@ -670,80 +625,98 @@ void App::WriteTrayLiveFile() {
     MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING);
 }
 
-void App::OnTrayIconActivated(const std::wstring& id) { ActivateTrayIcon(id, false); }
-
-void App::OnTrayIconContext(const std::wstring& id) { ActivateTrayIcon(id, true); }
-
-void App::ActivateTrayIcon(const std::wstring& id, bool rightButton) {
-    auto find = [&](const TrayIcon*& found) {
-        found = nullptr;
-        for (const auto& icon : tray_.icons()) {
-            if (icon.id == id) {
-                found = &icon;
-                break;
-            }
-        }
-    };
-    const TrayIcon* icon = nullptr;
-    find(icon);
-    if (!icon) {
-        ClosePopup();
+void App::OnTrayIconActivated(const atrium::TrayIcon& icon) {
+    if (!tray_) return;
+    // The popup (and the hover it forwarded) goes away before the app is told.
+    ClosePopup();
+    const std::wstring identity = TrayIconIdentity(icon);
+    const ULONGLONG now = GetTickCount64();
+    const bool continuation = lastTrayClick_ && !identity.empty() &&
+                              TrayIconIdentity(*lastTrayClick_) == identity &&
+                              now - lastTrayClickTick_ <= GetDoubleClickTime();
+    if (continuation) {
+        // The first click was already delivered: this is the shell's second click
+        // of a double click, not a new single click.
+        lastTrayClick_.reset();
+        lastTrayClickTick_ = 0;
+        tray_->DoubleClick(icon, true);
+        Log(L"tray: double-click continuation on %ls", TrayIconLabel(icon).c_str());
         return;
     }
+    lastTrayClick_ = icon;
+    lastTrayClickTick_ = now;
+    tray_->Click(icon, false);
+    Log(L"tray: left click on %ls", TrayIconLabel(icon).c_str());
+}
 
-    // Hosted icons speak the real shell protocol: send the same callback
-    // messages Explorer would. This works for visible and hidden icons alike.
-    if (!icon->hostKey.empty() && trayHost_ && trayHost_->Running() && !trayHost_->Yielded()) {
-        POINT at{};
-        GetCursorPos(&at);
-        const auto action = rightButton ? atrium::tray::HostAction::Right
-                                        : atrium::tray::HostAction::Left;
-        if (trayHost_->Send(icon->hostKey, action, at)) {
-            Log(L"tray host: %ls click %ls", rightButton ? L"right" : L"left", icon->label.c_str());
-            ClosePopup();
-            return;
-        }
-    }
-
-    // Auto-hidden taskbars report no usable icon rectangle. Reveal the taskbar
-    // with the pointer at the screen edge, refresh its live rects, and click the
-    // real icon; restore the pointer afterwards.
-    POINT old{};
-    GetCursorPos(&old);
-    bool revealed = false;
-    if (!icon->hasScreenRect) {
-        SetCursorPos(GetSystemMetrics(SM_CXSCREEN) / 2, GetSystemMetrics(SM_CYSCREEN) - 2);
-        Sleep(450);
-        tray_.Refresh();
-        find(icon);
-        revealed = icon && icon->hasScreenRect;
-    }
-    if (icon && icon->hasScreenRect) {
-        Log(L"tray: forwarding %ls click to %ls", rightButton ? L"right" : L"left", icon->label.c_str());
-        ClickTrayIcon(*icon, rightButton);
-    } else if (icon && icon->overflowProxy) {
-        // Hidden tray records share the chevron rectangle; open Explorer's real
-        // hidden-icon panel. Once it is open, ask for fresh rects and, if the
-        // target now has its own item rectangle, click that actual icon.
-        Log(L"tray: opening system overflow for %ls", icon->label.c_str());
-        TrayIcon proxy = *icon;
-        proxy.screenRect = icon->overflowRect;
-        proxy.hasScreenRect = true;
-        ClickTrayIcon(proxy, false);
-        Sleep(350);
-        tray_.Refresh();
-        find(icon);
-        if (icon && icon->hasScreenRect && !icon->overflowProxy) {
-            Log(L"tray: forwarding hidden %ls click at %ld,%ld", icon->label.c_str(), icon->screenRect.left,
-                icon->screenRect.top);
-            ClickTrayIcon(*icon, rightButton);
-        }
-    } else if (icon) {
-        Log(L"tray: no clickable rect for %ls; launching %ls", icon->label.c_str(), icon->exe.c_str());
-        ActivateOrLaunchExecutable(icon->exe);
-    }
-    if (revealed) SetCursorPos(old.x, old.y);
+void App::OnTrayIconContext(const atrium::TrayIcon& icon) {
+    if (!tray_) return;
     ClosePopup();
+    lastTrayClick_.reset();
+    lastTrayClickTick_ = 0;
+    tray_->Click(icon, true);
+    Log(L"tray: right click on %ls", TrayIconLabel(icon).c_str());
+}
+
+void App::OnTrayIconHover(const atrium::TrayIcon* icon) {
+    if (!tray_) return;
+    // Native hover: the hosted app gets the shell's arrival/popup/close messages.
+    tray_->Hover(icon);
+}
+
+void App::OnTrayModelEvent(WPARAM event) {
+    if (!tray_) return;
+    switch (event) {
+        case 0: {  // the icon list changed
+            trayIconsCache_ = tray_->Icons();
+            // Before the model's first read completes the list is empty: keep the
+            // previous tray-live snapshot rather than publishing an empty one.
+            if (tray_->Loaded()) WriteTrayLiveFile();
+            if (bar_) {
+                bar_->Invalidate();
+                RenderBar();
+                // Apps asking Shell_NotifyIconGetRect get the freshly laid-out area,
+                // unless the hidden-icon panel is open: that one keeps its own anchor
+                // (set by OnTrayOverflow) while it is on screen.
+                if (!popup_.IsVisible() || popup_.kind() != PopupKind::Tray)
+                    tray_->SetHostPlaces(bar_->trayAreaScreenRect());
+            }
+            if (popup_.IsVisible() && !popup_.closing()) {
+                // The hidden-icon list may have changed under the open panel: repaint it
+                // with the fresh icons instead of closing it (the host updates while it
+                // is open). Each layout snapshots the icons it draws, so a click still
+                // routes to the icon that was drawn.
+                if (popup_.kind() == PopupKind::Tray) popup_.RefreshPanel();
+                else popup_.Render();
+            }
+            break;
+        }
+        case 1:  // an app answered the forwarded click: it worked, do not retry
+            Log(L"tray: click observed by the app");
+            break;
+        case 2:  // Explorer's own hidden-icons panel was opened instead
+            Log(L"tray: the system tray opened");
+            break;
+        case 3:  // nothing could deliver the click: the user has to act
+            Log(L"tray: needs user intervention; the Windows notification area must be used");
+            if (bar_) {
+                bar_->ShowTrayHint(settings_.language != L"en-US"
+                                       ? L"请在 Windows 托盘中操作该图标"
+                                       : L"Use the Windows notification area for this icon");
+            }
+            break;
+        case 4:  // accepted but unconfirmed: never retried
+            Log(L"tray: action accepted without confirmation");
+            break;
+        default:  // 5: an explicit system-tray opening succeeded; nothing to do
+            break;
+    }
+}
+
+RECT App::trayAreaScreenRect() const {
+    if (bar_) return bar_->trayAreaScreenRect();
+    RECT none{};
+    return none;
 }
 
 void App::OnDisplayChanged() {
@@ -785,6 +758,9 @@ void App::OnTrayOverflow(RECT anchorScreen) {
         ClosePopup();
         return;
     }
+    // While the hidden-icon panel is open, apps asking where their icon is are
+    // told the panel's place (the renderer's own cells come from the model).
+    if (tray_) tray_->SetHostPlaces(anchorScreen);
     ShowPanel(PopupKind::Tray, MenuId::None, anchorScreen);
 }
 
@@ -1029,6 +1005,7 @@ void App::ApplySettings(bool initial) {
     }
     bar_->Invalidate();
     if (IsWindowVisible(bar_->hwnd())) bar_->Render(true);
+    if (tray_ && bar_) tray_->SetHostPlaces(bar_->trayAreaScreenRect());
     sys_.Refresh(true);
     RefreshStatusAndRender();
     ApplyLaunchAtLogin();
@@ -1243,9 +1220,16 @@ void App::OnTrayMessage(WPARAM, LPARAM lParam) {
 
 void App::ShowAbout() {
     const bool zh = settings_.language != L"en-US";
-    const wchar_t* text = zh
-        ? L"SuperMenu 1.0\n\nWindows 的 macOS 风格顶部菜单栏。\n液态玻璃着色器参考 Atrium Desktop（MIT）。\n字体 HarmonyOS Sans SC（Huawei Device / Hanyi Fonts）。\n\n设计与 Apple macOS 无关联。"
-        : L"SuperMenu 1.0\n\nA macOS-style top menu bar for Windows.\nLiquid glass shader adapted from Atrium Desktop (MIT).\nHarmonyOS Sans SC font by Huawei Device / Hanyi Fonts.\n\nNot affiliated with Apple macOS.";
+    // The version follows the build version (native/CMakeLists.txt project VERSION,
+    // through the generated supermenu_version.h), never a hand-written string.
+    wchar_t text[1024];
+    if (zh) {
+        swprintf_s(text, L"SuperMenu %ls\n\nWindows 的 macOS 风格顶部菜单栏。\n液态玻璃着色器参考 Atrium Desktop（MIT）。\n字体 HarmonyOS Sans SC（Huawei Device / Hanyi Fonts）。\n\n设计与 Apple macOS 无关联。",
+                   SUPERMENU_VERSION_W);
+    } else {
+        swprintf_s(text, L"SuperMenu %ls\n\nA macOS-style top menu bar for Windows.\nLiquid glass shader adapted from Atrium Desktop (MIT).\nHarmonyOS Sans SC font by Huawei Device / Hanyi Fonts.\n\nNot affiliated with Apple macOS.",
+                   SUPERMENU_VERSION_W);
+    }
     MessageBoxW(bar_ ? bar_->hwnd() : nullptr, text, L"About SuperMenu", MB_ICONINFORMATION | MB_OK);
 }
 
@@ -1325,8 +1309,8 @@ LRESULT CALLBACK App::TrayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         if (self->popupVisible()) self->popup_.HandleKey(static_cast<int>(wParam));
         return 0;
     }
-    if (msg == kTrayHostChanged) {
-        self->RefreshTrayFromHost();
+    if (msg == kTrayModelEvent) {
+        self->OnTrayModelEvent(wParam);
         return 0;
     }
     if (g_settingsChanged && msg == g_settingsChanged) {
@@ -1352,7 +1336,9 @@ LRESULT CALLBACK App::TrayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         if (self->bar_) {
             self->bar_->RegisterAppBar(self->settings_.reserveWorkArea && !self->settings_.autoHide);
             self->bar_->Show(true);
-            self->tray_.Refresh();
+            // Explorer restarted: the model re-reads the new shell's tray; its
+            // host keeps forwarding and handles the TaskbarCreated broadcast.
+            if (self->tray_) self->tray_->Refresh();
             self->lastTrayRefreshMs_ = NowMs();
             self->sys_.Refresh(true);
             self->RefreshStatusAndRender();

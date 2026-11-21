@@ -165,7 +165,7 @@ public partial class MainWindow : Window
         get
         {
             var version = typeof(MainWindow).Assembly.GetName().Version;
-            return version is null ? "1.0.0" : $"{version.Major}.{version.Minor}.{version.Build}";
+            return version is null ? "1.1.0" : $"{version.Major}.{version.Minor}.{version.Build}";
         }
     }
 

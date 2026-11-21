@@ -24,13 +24,13 @@
   Build and verify, but do not create a release zip.
 
 .EXAMPLE
-  .\build.ps1 -Version 1.0.0 -Clean
+  .\build.ps1 -Version 1.1.0 -Clean
 
 .EXAMPLE
   .\build.ps1 -SkipBuild
 #>
 param(
-    [string]$Version = '1.0.0',
+    [string]$Version = '1.1.0',
     [switch]$Clean,
     [switch]$SkipBuild,
     [switch]$SkipZip
@@ -48,7 +48,7 @@ $hashPath = Join-Path $releaseRoot "$stageName.sha256"
 $buildScript = Join-Path $root 'scripts\build.ps1'
 
 if ($Version -notmatch '^\d+\.\d+\.\d+([-.][0-9A-Za-z.-]+)?$') {
-    throw "Invalid version '$Version'. Use a SemVer-like value, for example 1.0.0."
+    throw "Invalid version '$Version'. Use a SemVer-like value, for example 1.1.0."
 }
 if (-not (Test-Path $buildScript)) {
     throw "Build script not found: $buildScript"

@@ -6,7 +6,7 @@
 SuperMenuBar.exe (C++ / Win32 GUI, per-monitor DPI aware v2)
 ├─ 顶栏窗口      SuperMenuBarWindow    WS_POPUP + WS_EX_TOPMOST + WS_EX_NOACTIVATE + WS_EX_NOREDIRECTIONBITMAP
 ├─ 弹出面板窗口  SuperMenuPopupWindow  同上，按需显示/复用；玻璃 + 内容共用一个 swap chain
-├─ 托盘消息窗口  SuperMenuTrayHost     隐藏窗口，只接 Shell_NotifyIcon 与广播消息
+├─ 托盘消息窗口  SuperMenuTrayHost     TrayModel 事件、设置广播、app 自身托盘图标
 └─ 主线程        消息循环 + 15 ms 定时器（渲染、捕获轮询、状态刷新）
 
 SuperMenu.Settings.exe (.NET 10 WPF，独立进程)
@@ -94,20 +94,38 @@ swap chain->Present(0,0) → DirectComposition visual → DWM 合成到桌面
   （资源管理器桌面显示“访达/Finder”；设置中心映射为“SuperMenu 设置”）。
 - 退出时 `ABM_REMOVE`，工作区恢复。
 
-## 4.0 托盘托管（Atrium trayHost）
+## 4.0 托盘（atrium::TrayModel，双源）
 
-- `native/src/atrium/` 是 Atrium Desktop 的 MIT 托盘宿主移植：独立线程的隐藏
-  `Shell_TrayWnd` 抢在 Explorer 之前接收应用的 `Shell_NotifyIcon`，保存 HICON/
-  tooltip/callback/version/NIS_HIDDEN 后原样转发给 Explorer；Explorer 重启时重新置前
-  并广播 TaskbarCreated。
-- `TrayHost::Icons()` 的实时图标由 `TrayReader::MergeHosted()` 按 GUID 或
-  `exe + uid` 合并到登记记录，实时图片覆盖旧快照/屏幕抓图；无登记记录的 host 图标
-  作为 host-only 项追加，SuperMenu 自身图标被过滤。
-- `TrayHost::Send()` 直接按应用的 callback/version 发送左/右键通知，v4 编码指针与 uid；
-  host 让位（`Yielded()`）或发送失败时才回退旧 Explorer 矩形/溢出区路径。
-- `BarWindow` 的 AppBar 调用改用 Atrium `AppBarMessage`，在主托盘窗口存在时把 host
+- `native/src/atrium/shell/tray_model.*` 是唯一托盘数据源，运行在 MTA worker：所有
+  UIA、注册表、`Shell_NotifyIconGetRect`、进程/版本查询、图片解码与点击确认都在
+  worker 上；UI 线程只 `Refresh()`/`Click()`/`Hover()` 排队并读取缓存，不阻塞渲染。
+- **read-back**：枚举 Explorer 托盘的 UIA 按钮（Win11 XAML 的
+  `DesktopWindowContentBridge` / `TopLevelWindowForOverflowXamlIsland` 下的
+  `NotifyItemIcon`；Win11 没有 `ToolbarWindow32`，Win10/旧壳退回经典 toolbar 按钮），
+  读 `HKCU\Control Panel\NotifyIconSettings` 的 `UIOrderList`/`IsPromoted`/
+  `IconSnapshot`/`ExecutablePath`，用 GUID 或 HWND+UID 做 GetRect 存活探测，再由
+  `tray_match` 按身份/几何/名字/顺序/运行程序对账。记录与快照只是缓存元数据。
+- **host**：`native/src/atrium/shell/tray_host.*` 在独立线程维持隐藏
+  `Shell_TrayWnd` 与 `TrayNotifyWnd`，抢在 Explorer 前接收 `Shell_NotifyIcon`
+  （`WM_COPYDATA` `dwData=1`），保存实时 HICON、回调消息、版本、`NIF_SHOWTIP`/
+  `NIS_HIDDEN` 与 tooltip，并原样转发给 Explorer（图标询问 `dwData=3`、AppBar 等消息
+  同样转发）。Explorer 拒绝重复 `NIM_ADD` 时改发 `NIM_MODIFY`；系统图标不接管。
+- **合并**：两个来源按真实身份（GUID / HWND+UID / 程序）合并；Host 图标用实时 HICON
+  覆盖快照并排在前面，Host-only 图标追加，只有 Explorer 有的图标保留读回结果；排序用
+  Windows 自己的 `UIOrderList`，显示位置用 `IsPromoted`；Host 让位时整表退回 read-back。
+  `native/src/tray_view.h` 在 `IsPromoted` 之上应用 `trayShow`/`trayHide` 覆盖
+  （按 `recordKey` 数字记录 id），SuperMenu 自身图标被过滤。
+- **共存**：Host 启动时记录 shell 会话身份（`Shell_TrayWnd` HWND + Explorer PID +
+  进程创建时间）；其他 Host 的 `TaskbarCreated` 广播不再当作 Explorer 重启，广播只在
+  启动和确认 Explorer 重启后各发一次；启动时最多一次接管尝试，失败即本会话固定让位
+  （`Yielded()`），不抢 z-order、不重发。
+- **点击**：Host-owned 图标按应用 callback/version 发 shell 协议；否则 read-back 依次
+  走 UIA Invoke/ShowContextMenu、Win10 经典 toolbar、`LegacyIAccessible`、恢复已有窗口、
+  短暂显示任务栏 + 物理右键、最后打开 Explorer 溢出区。结果分
+  observed / accepted-unconfirmed（不重试）/ system-tray / needs-user。
+- `BarWindow` 的 AppBar 调用仍用 Atrium `AppBarMessage`，在有 tray host 窗口时把 host
   暂时放到 Explorer 后面再发 `SHAppBarMessage`。
-- 完整边界与实测见 `docs/TRAY.md`。
+- 细节与实测见 `docs/TRAY.md`，移植来源与边界见 `docs/research/tray-refactor.md`。
 
 ## 4.1 状态字形与系统托盘
 
@@ -172,45 +190,22 @@ swap chain->Present(0,0) → DirectComposition visual → DWM 合成到桌面
   `wifi_off`。电池来自 `GetSystemPowerStatus`：按 `battery_low/medium/full/charging`
   切换，无电池时整个电池图标省略；状态变化会进入 `statusKey` 触发栏重绘。
 - 右侧项间距由 `rightIconSpacing`（2–24 DIP，默认 20）控制，同时用于
-  statusCluster 内部字形、搜索、时钟和托盘图标；托盘图标位图仍按 `imageId` 缓存。
-- `Layout` 每帧重建 `BarItem`，但按 `MenuId`/trayId 继承上一帧的 hover 进度；否则
-  hover 从 0 重新开始，悬停底板会逐帧闪烁。statusCluster 始终以整个 `item.plate`
+  statusCluster 内部字形、搜索、时钟和托盘图标；托盘图标位图按 `imageVersion` 缓存。
+- `Layout` 每帧重建 `BarItem`，但按 `MenuId`/托盘图标身份继承上一帧的 hover 进度；
+  否则 hover 从 0 重新开始，悬停底板会逐帧闪烁。statusCluster 始终以整个 `item.plate`
   绘制一块连续强调底板，无论控制中心是否打开；悬停任意状态图标都会点亮整块。
   时钟文本的 `item.text` 左右各内缩 8 DIP，使右对齐的日期/时间在强调板中保持
   左右对称。
-- `TrayReader` 读取 `HKCU\Control Panel\NotifyIconSettings`。存活探测同时缓存
-  `Shell_NotifyIconGetRect` 返回的屏幕矩形；对**唯一可见矩形**（promoted 图标）
-  不直接信任旧 `IconSnapshot`，而是每 2 秒抓取任务栏像素，按局部背景扣色并缩放为
-  32×32 预乘 BGRA，因此动态图标（Tailscale 等）显示当前状态。`WindowFromPoint`
-  检测任务栏是否真的显示，自动隐藏时跳过抓取，避免把壁纸当图标。
-- 隐藏记录都返回同一个溢出箭头矩形：`TrayReader` 把它们标记为 `overflowProxy`。
-  `OnTrayIconActivated` 先点击该箭头打开系统溢出面板，等待布局后刷新矩形；若目标
-  图标获得独立矩形，再用 `SendInput` 转发真实点击，否则保留系统面板。
-  平台仍没有公开的托盘回调重放 API；读取依据与 Atrium
-  （参考其 `docs/TRAY.md` 的 UIA/注册表证据链与边界说明）一致：Explorer 持久化的
-  `IconSnapshot` 只是缓存元数据，不是实时托盘回调或实时动画位图；因此 SuperMenu
-  采用只读镜像，不注入 Explorer：
-  - 根值的 `UIOrderList`（uint64 ID 序列）决定顺序；
-  - 每条记录取 `IconSnapshot` PNG、`InitialTooltip`、`ExecutablePath`、`IsPromoted`；
-  - `ExecutablePath` 支持 `{FOLDERID}` 与 `%ENV%` 展开；
-  - PNG 经 WIC 转为 32×32 预乘 BGRA；存活记录优先用 `SHGetFileInfo` 提取运行 exe 的
-    实际应用图标，只有失败时才用 Explorer 快照；
-  - 过滤 SuperMenu 自身、按 `(imageId, label)` 去重；
-  - **存活校验**：GUID 记录调用 `Shell_NotifyIconGetRect`（空 HWND）；UID 记录枚举
-    同 exe 的顶层/消息窗口后逐窗口调用。`S_OK` 视为图标当前存在，返回失败的历史记录
-    丢弃；任务栏隐藏时返回的矩形坐标可能无意义，因此只把 HRESULT 当证据；
-  - 结果缓存在 `TrayReader` 中，热刷新约 1 ms；存活探测与窗口枚举约 30–45 ms。
-- `IsPromoted=1` 的存活图标放在顶栏右侧状态区之前；其余存活图标通过 Chevron
-  （`E70D`）打开 `PopupKind::Tray` 玻璃网格面板。
-- 原生把存活记录 ID 写入 `%LOCALAPPDATA%\SuperMenu\tray-live.txt`；设置中心读取
-  15 秒内的快照，只显示当前存活图标，避免把退出程序的历史记录混入自定义列表。
-- 点击托盘图标不会伪造 Explorer 的回调（Windows 没有公开 API），而是通过
-  `ActivateOrLaunchExecutable` 激活对应程序或启动其 exe；顶栏使用标准 Win32
-  tooltip 显示提示文字。
-- 顶部栏每一帧使用 `ID2D1Bitmap` 缓存按 `imageId` 复用图标位图，避免每帧重建。
-- 用户可自定义每个存活托盘记录的顶栏/隐藏位置：`trayShow` / `trayHide` 保存十进制
-  record ID（分号分隔），`IsTrayIconShown()` 的优先级为 hide → show → `IsPromoted`。
-  设置中心读取同一份存活快照，修改覆盖列表后由原生设置热重载应用。
+- 托盘 UI：`BarWindow` 按 `tray_view.h::TrayIconShown()` 选显示项（hide → show →
+  `IsPromoted`），`IsPromoted` 图标直接排在右侧状态区之前，其余经 Chevron（`E70D`）
+  打开 `PopupKind::Tray` 玻璃网格面板；面板打开期间列表原地刷新。标题用
+  `TrayModel::Title()`；Host 图标用实时 HICON，read-back 图标用 Explorer 快照或程序
+  图标，统一生成 32×32 预乘 BGRA 并按 `imageVersion` 缓存位图。面板命中项携带
+  `atrium::TrayIcon` 身份，左/右键、双击与悬停都交给 `TrayModel` 解析分发，不按序号
+  点击。
+- 原生把存活记录的 `recordKey` 写入 `%LOCALAPPDATA%\SuperMenu\tray-live.txt`；设置中心
+  读取 15 秒内的快照只显示当前存活图标，用户用 `trayShow`/`trayHide`（十进制 record
+  id，分号分隔）覆盖 `IsPromoted`，设置热重载后按同一份数据重绘。
 - 前台焦点为 Explorer 桌面时，`App::UpdateDesktopMenuState()` 关闭弹出面板并触发
   重排；`BarWindow::Layout` 隐藏 AppMenu/File/Edit/View/Window/Help 以及“访达”应用名，
   只保留玻璃顶栏、Apple 菜单和右侧状态区。全屏应用仍然隐藏整个顶栏。
@@ -304,7 +299,10 @@ SuperMenuBar::TrayWndProc 收到广播 → settingsStamp_ = 0 → 下一个 tick
 | `gpu.cpp/h` | 显示器/适配器、D3D11、D2D、DWrite、运行时着色器编译、HarmonyOS Sans SC 与 Segoe Fluent Icons 私有字体集合 |
 | `settings.cpp/h`、`json.cpp/h` | 设置文件解析/校验/材质参数 |
 | `system_status.cpp/h` | 前台应用、电池、WiFi、音量、亮度、系统命令、托盘程序激活 |
-| `tray.cpp/h` | 读取 Explorer 通知区域记录、PNG 解码、排序/去重、图标缓存 |
+| `atrium/shell/tray_model.*` | 托盘唯一数据源：read-back（UIA/注册表/GetRect）+ Host 合并、点击路由与证据（Atrium Desktop MIT） |
+| `atrium/shell/tray_match.*`、`tray_click.h`、`tray_target.h`、`tray_pointer.h`、`tray_image.h`、`tray_taskbar.h` | 纯函数/辅助模块：身份对账、点击策略、目标校验、物理右键、素材选择、任务栏临时显示（Atrium Desktop MIT） |
+| `atrium/shell/tray_host.*`、`tray_protocol.h` | 隐藏 `Shell_TrayWnd` 托盘宿主、shell 回调协议、会话/所有权与广播 |
+| `tray_view.h` | 托盘图标显示判定、标题与设置覆盖的纯函数 |
 | `ui_util.cpp/h`、`fluent_glyphs.h`、`icons.cpp/h` | 字体/排版、Segoe Fluent 私有字形、品牌标志矢量、墨色、悬停动画 |
 | `shaders/glass.hlsl` | 液态玻璃着色器 |
 | `resources/` | manifest、图标、版本信息 |

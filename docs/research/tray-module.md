@@ -1,5 +1,8 @@
 # Tray registry reader (`native/src/tray.h`, `tray.cpp`)
 
+> 状态：历史记录。`native/src/tray.h/.cpp` 已在 2026-11-21 托盘重构中删除；现行实现见
+> [`docs/TRAY.md`](../TRAY.md) 与 [`docs/research/tray-refactor.md`](tray-refactor.md)。
+
 Status: implemented, standalone-verified, integrated by the lead. Read-only with
 respect to the registry and settings; it never registers or modifies tray icons.
 

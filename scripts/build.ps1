@@ -12,17 +12,17 @@
 .PARAMETER Zip
   Also create dist/SuperMenu-<version>-win-x64.zip.
 .PARAMETER Version
-  Release version written to VERSION.txt and the zip name. Default 1.0.0.
+  Release version written to VERSION.txt and the zip name. Default 1.1.0.
 #>
 param(
     [switch]$SkipSettings,
     [switch]$KeepRunning,
     [switch]$Zip,
-    [string]$Version = '1.0.0'
+    [string]$Version = '1.1.0'
 )
 
 if ($Version -notmatch '^\d+\.\d+\.\d+([-.][0-9A-Za-z.-]+)?$') {
-    throw "Invalid version '$Version'. Use a SemVer-like value, for example 1.0.0."
+    throw "Invalid version '$Version'. Use a SemVer-like value, for example 1.1.0."
 }
 
 $ErrorActionPreference = 'Stop'
